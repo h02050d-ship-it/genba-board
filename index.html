@@ -168,14 +168,28 @@ const SEED_TASKS = {
 const ALL = Object.keys(SEED_TASKS);
 const skillsOf = (...exclude) => { const s = {}; ALL.forEach(t => { if (!exclude.includes(t)) s[t] = 1; }); return s; };
 const SEED_MEMBERS = {
-  daiki:    { seq:1, name:'大樹',     age:'', retireAge:70, hours:8, eff:100, reserveMin:120, reserveTask:'kaizen', skills: skillsOf(), note:'経理以外全般' },
-  junya:    { seq:2, name:'潤也',     age:'', retireAge:70, hours:8, eff:100, skills: skillsOf('hamono_kenma','hamono_koukan'), note:'研磨・刃物交換・経理以外' },
-  kaede:    { seq:3, name:'楓',       age:'', retireAge:70, hours:8, eff:100, skills: skillsOf('hamono_kenma','hamono_koukan'), note:'モルダーのセット以外（運転は可）' },
-  chichi:   { seq:4, name:'父',       age:'', retireAge:75, hours:8, eff:100, skills:{ anaake:1, itahoshi:1, itayose:1, edamuki:1, edakiri:1, choshi_okuri:1, kessoku:1, sonota:1 }, note:'穴あけ専任' },
-  haha:     { seq:5, name:'母',       age:'', retireAge:75, hours:8, eff:100, skills: skillsOf('anaake'), note:'穴あけ以外（研磨・刃物・超仕上げ受け・事務可）※要確認' },
-  yamada:   { seq:6, name:'山田さん', age:65, retireAge:70, hours:6, eff:100, skills:{ umeki:1, pate:1, choshi_okuri:1, edamuki:1, edashiwake:1, kessoku:1, sonota:1 }, note:'パート。メイン=埋木・パテ・超仕上げ流し' },
-  nakayama: { seq:7, name:'中山さん', age:72, retireAge:75, hours:6, eff:100, skills:{ umeki:1, pate:1, choshi_okuri:1, edamuki:1, edashiwake:1, kessoku:1, itayose:1, itahoshi:1, edakiri:1, sonota:1 }, note:'パート。山田さんの作業＋板寄せ・干す・枝切' }
+  daiki:    { seq:1, name:'大樹',     age:'', retireAge:70, workStart:'08:00', workEnd:'16:00', eff:100, reserveMin:120, reserveTask:'kaizen', skills: skillsOf(), note:'経理以外全般' },
+  junya:    { seq:2, name:'潤也',     age:'', retireAge:70, workStart:'08:00', workEnd:'16:00', eff:100, skills: skillsOf('hamono_kenma','hamono_koukan'), note:'研磨・刃物交換・経理以外' },
+  kaede:    { seq:3, name:'楓',       age:'', retireAge:70, workStart:'09:00', workEnd:'15:00', eff:100, absentUntil:'2026-11-30', skills: skillsOf('hamono_kenma','hamono_koukan'), note:'モルダーのセット以外（運転は可）。11月まで育休' },
+  chichi:   { seq:4, name:'父',       age:'', retireAge:75, workStart:'07:00', workEnd:'16:00', eff:100, skills:{ anaake:1, itahoshi:1, itayose:1, edamuki:1, edakiri:1, choshi_okuri:1, kessoku:1, sonota:1 }, note:'穴あけ専任' },
+  haha:     { seq:5, name:'母',       age:'', retireAge:75, workStart:'08:00', workEnd:'16:00', eff:100, skills: skillsOf('anaake'), note:'穴あけ以外（研磨・刃物・超仕上げ受け・事務可）※要確認' },
+  yamada:   { seq:6, name:'山田さん', age:65, retireAge:70, workStart:'08:00', workEnd:'15:00', eff:100, skills:{ umeki:1, pate:1, choshi_okuri:1, edamuki:1, edashiwake:1, kessoku:1, sonota:1 }, note:'パート。メイン=埋木・パテ・超仕上げ流し' },
+  nakayama: { seq:7, name:'中山さん', age:72, retireAge:75, workStart:'08:00', workEnd:'15:00', eff:100, skills:{ umeki:1, pate:1, choshi_okuri:1, edamuki:1, edashiwake:1, kessoku:1, itayose:1, itahoshi:1, edakiri:1, sonota:1 }, note:'パート。山田さんの作業＋板寄せ・干す・枝切' }
 };
+// 全員共通の休憩（勤務時間内にかかる分だけ差し引く）
+const BREAKS = [ { at: 10*60, min: 15 }, { at: 12*60, min: 45 }, { at: 15*60, min: 15 } ];
+function workMinutes(m) {   // 休憩を引いた実働（分）
+  const p = s => { const parts = String(s).split(':'); return (parseInt(parts[0])||0)*60 + (parseInt(parts[1])||0); };
+  if (m.workStart && m.workEnd) {
+    const st = p(m.workStart), en = p(m.workEnd);
+    let mins = Math.max(0, en - st);
+    BREAKS.forEach(b => { if (b.at >= st && b.at < en) mins -= b.min; });
+    return Math.max(0, mins);
+  }
+  return (parseFloat(m.hours)||8) * 60;   // 勤務時間未設定の人は旧・稼働(h)で計算
+}
+function capMinutes(m) { return workMinutes(m) * ((parseFloat(m.eff)||100)/100); }
+function isAbsent(m) { return !!(m.absentUntil && String(m.absentUntil) >= curDate()); }
 
 // ===== 状態 =====
 let tasks = {}, members = {}, queue = {}, queueItems = {}, targets = {}, actuals = {};
@@ -232,6 +246,12 @@ function ensureUpgrades() {
     if (!(members.daiki.skills||{}).kaizen) ups['members/daiki/skills/kaizen'] = 1;
     if (members.daiki.reserveMin === undefined) { ups['members/daiki/reserveMin'] = 120; ups['members/daiki/reserveTask'] = 'kaizen'; }
   }
+  // 勤務時間を既存メンバーに後付け
+  const WK = { daiki:['08:00','16:00'], junya:['08:00','16:00'], haha:['08:00','16:00'], chichi:['07:00','16:00'], yamada:['08:00','15:00'], nakayama:['08:00','15:00'], kaede:['09:00','15:00'] };
+  Object.entries(WK).forEach(([id, se]) => {
+    if (members[id] && members[id].workStart === undefined) { ups['members/'+id+'/workStart'] = se[0]; ups['members/'+id+'/workEnd'] = se[1]; }
+  });
+  if (members.kaede && members.kaede.absentUntil === undefined) ups['members/kaede/absentUntil'] = '2026-11-30';
   // 旧「作業待ちの量」→ 優先度付き待ちリストへ移行（ストック扱い）
   if (!Object.keys(queueItems).length && Object.keys(queue).length) {
     Object.entries(queue).forEach(([tid, q]) => {
@@ -278,7 +298,7 @@ function autoAssign() {
   const d = kakouDemand();
   const att = sortedMembers().filter(([id]) => plan && plan.att && plan.att[id]);
   const cap = {};
-  att.forEach(([id, m]) => cap[id] = (parseFloat(m.hours)||8) * 60 * ((parseFloat(m.eff)||100)/100));
+  att.forEach(([id, m]) => cap[id] = capMinutes(m));
   const rows = [];
   const put = (mid, tid, min, note, qi) => {
     const t = tasks[tid];
@@ -377,9 +397,9 @@ function ensurePlan() {
   if (!plan) plan = { att: {}, rows: [] };
   if (!plan.att) plan.att = {};
   if (!plan.rows) plan.rows = [];
-  // まだ誰も出勤設定がなく割振りもしていない日は、全員出勤を初期値にする
+  // まだ誰も出勤設定がなく割振りもしていない日は、全員出勤を初期値にする（休業中の人は除く）
   if (!Object.keys(plan.att).length && !plan.rows.length && Object.keys(members).length) {
-    sortedMembers().forEach(([id]) => plan.att[id] = 1);
+    sortedMembers().forEach(([id, m]) => { if (!isAbsent(m)) plan.att[id] = 1; });
   }
 }
 function toggleAtt(mid) {
@@ -403,7 +423,7 @@ function renderToday() {
   html += `<div class="card hl"><div class="c-label">モルダー残</div><div class="c-val">${fmtMin(d.molderMin)}</div><div class="c-note">製造中 ${d.seizouCount}件</div></div>`;
   if (dailyNorm) html += `<div class="card"><div class="c-label">1日の標準ペース</div><div class="c-val">${dailyNorm}<span style="font-size:14px"> 束/日</span></div><div class="c-note">年間目標${t.yearBundles}束 ÷ ${t.workDays}日</div></div>`;
   const attCount = Object.keys(plan.att).length;
-  const totalCap = sortedMembers().filter(([id])=>plan.att[id]).reduce((s,[,m])=>s+(parseFloat(m.hours)||8)*60*((parseFloat(m.eff)||100)/100),0);
+  const totalCap = sortedMembers().filter(([id])=>plan.att[id]).reduce((s,[,m])=>s+capMinutes(m),0);
   html += `<div class="card"><div class="c-label">今日の稼働力</div><div class="c-val">${attCount}<span style="font-size:14px"> 人</span></div><div class="c-note">計 ${fmtMin(totalCap)}</div></div>`;
   html += '</div>';
 
@@ -411,7 +431,9 @@ function renderToday() {
   html += '<div class="sec"><h2>出勤メンバー</h2><div class="att-list">';
   sortedMembers().forEach(([id, m]) => {
     const on = !!plan.att[id];
-    html += `<div class="att-chip ${on?'on':'off'}" onclick="toggleAtt('${id}')">${on?'✓':'－'} ${esc(m.name)}</div>`;
+    const ab = isAbsent(m) ? ' <span style="font-size:11px;opacity:.8">🍼休業中</span>' : '';
+    const wk = m.workStart && m.workEnd ? ` <span style="font-size:11px;opacity:.7">${esc(m.workStart)}〜${esc(m.workEnd)}</span>` : '';
+    html += `<div class="att-chip ${on?'on':'off'}" onclick="toggleAtt('${id}')">${on?'✓':'－'} ${esc(m.name)}${wk}${ab}</div>`;
   });
   html += '</div></div>';
 
@@ -478,7 +500,7 @@ function renderToday() {
     // 負荷バー
     html += '<div style="margin-top:12px">';
     sortedMembers().filter(([id])=>plan.att[id]).forEach(([mid, m]) => {
-      const capMin = (parseFloat(m.hours)||8)*60*((parseFloat(m.eff)||100)/100);
+      const capMin = capMinutes(m);
       const used = plan.rows.filter(r=>r.m===mid).reduce((s,r)=>s+(parseFloat(r.min)||0),0);
       const pct = Math.min(100, Math.round(used/capMin*100));
       html += `<div style="display:flex;align-items:center;gap:8px"><span style="width:70px;font-size:13px;font-weight:700">${esc(m.name)}</span>
@@ -704,7 +726,7 @@ function loadStats(cb) {
 function renderMembers() {
   const el = document.getElementById('page-members');
   let html = '<div class="sec"><h2>メンバー</h2>';
-  html += '<table style="max-width:1100px"><tr><th>順</th><th>名前</th><th>年齢</th><th>引退予定年齢</th><th>1日の稼働(h)</th><th>能率(%)</th><th>固定枠(分/日)</th><th>固定枠の作業</th><th>メモ</th><th></th></tr>';
+  html += '<table style="max-width:1250px"><tr><th>順</th><th>名前</th><th>年齢</th><th>引退予定年齢</th><th>出勤</th><th>退勤</th><th>実働</th><th>能率(%)</th><th>固定枠(分/日)</th><th>固定枠の作業</th><th>休業中(〜日付)</th><th>メモ</th><th></th></tr>';
   sortedMembers().forEach(([id, m]) => {
     const rOpts = '<option value="">-</option>' + sortedTasks().map(([tid, t]) =>
       `<option value="${tid}" ${m.reserveTask===tid?'selected':''}>${esc(t.name)}</option>`).join('');
@@ -713,15 +735,18 @@ function renderMembers() {
       <td class="l member-name" contenteditable="true" onblur="mEdit('${id}','name',this.textContent.trim())">${esc(m.name)}</td>
       <td contenteditable="true" onblur="mEdit('${id}','age',parseFloat(this.textContent)||'')">${m.age||''}</td>
       <td contenteditable="true" onblur="mEdit('${id}','retireAge',parseFloat(this.textContent)||'')">${m.retireAge||''}</td>
-      <td contenteditable="true" onblur="mEdit('${id}','hours',parseFloat(this.textContent)||8)">${m.hours||8}</td>
+      <td><input type="time" value="${esc(m.workStart||'')}" onchange="mEdit('${id}','workStart',this.value)"></td>
+      <td><input type="time" value="${esc(m.workEnd||'')}" onchange="mEdit('${id}','workEnd',this.value)"></td>
+      <td style="font-weight:700">${fmtMin(workMinutes(m))}</td>
       <td contenteditable="true" onblur="mEdit('${id}','eff',parseFloat(this.textContent)||100)">${m.eff||100}</td>
       <td contenteditable="true" onblur="mEdit('${id}','reserveMin',parseFloat(this.textContent)||0)">${m.reserveMin||''}</td>
       <td><select onchange="mEdit('${id}','reserveTask',this.value)">${rOpts}</select></td>
+      <td contenteditable="true" onblur="mEdit('${id}','absentUntil',this.textContent.trim())" style="font-size:12px;${isAbsent(m)?'background:#fff3e0;font-weight:700':''}">${esc(m.absentUntil||'')}</td>
       <td class="l" contenteditable="true" onblur="mEdit('${id}','note',this.textContent.trim())" style="font-size:12px;color:#666">${esc(m.note||'')}</td>
       <td><button class="btn-del" onclick="if(confirm('「${esc(m.name)}」を削除しますか？'))db.ref('genba/members/${id}').remove()">削除</button></td></tr>`;
   });
   html += '</table><div style="margin-top:10px"><button class="btn blue" onclick="addMember()">＋ メンバーを追加</button></div>';
-  html += '<div class="hint" style="margin-top:8px">能率(%)：標準を100として。慣れてきたら110、体力的にゆっくりなら80のように（成長を織り込む欄）。<b>固定枠</b>：毎日必ず確保する時間。大樹のAI・業務改善や、事務・研磨の定常時間など。自動割振りが最初にこの時間を除けてから現場作業を配ります。年齢・引退予定は将来シミュレーションに使います。</div></div>';
+  html += '<div class="hint" style="margin-top:8px">実働＝出勤〜退勤から勤務時間内の休憩（10:00に15分・12:00に45分・15:00に15分）を自動で差し引いた時間。能率(%)：標準を100として、慣れてきたら110、体力的にゆっくりなら80のように（成長を織り込む欄）。<b>固定枠</b>：毎日必ず確保する時間（大樹のAI・業務改善など）。<b>休業中</b>：日付（例 2026-11-30）を入れると、その日まで出勤の初期値から外れます。年齢・引退予定は将来シミュレーションに使います。</div></div>';
 
   // スキルマトリクス
   html += '<div class="sec"><h2>できる作業（スキル表）</h2><div class="hint">チェックした作業だけ割振り対象になります。</div><div class="skills-scroll"><table><tr><th style="min-width:90px">名前＼作業</th>';
@@ -759,7 +784,7 @@ function renderFuture() {
       const age = parseFloat(m.age);
       const ra = parseFloat(m.retireAge);
       if (!isNaN(age) && !isNaN(ra) && age + yOffset >= ra) { gone.push(m.name + '(' + (age+yOffset) + '歳)'); return; }
-      h += (parseFloat(m.hours)||8) * wD * ((parseFloat(m.eff)||100)/100);
+      h += capMinutes(m) / 60 * wD;
     });
     return { h: Math.round(h), gone };
   };

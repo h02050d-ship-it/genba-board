@@ -69,6 +69,16 @@
   .skills-scroll th.rot { height:110px; white-space:nowrap; vertical-align:bottom; padding:4px 2px; }
   .skills-scroll th.rot > div { writing-mode:vertical-rl; text-orientation:mixed; margin:0 auto; font-size:12px; }
   .skills-scroll td:first-child, .skills-scroll th:first-child { position:sticky; left:0; background:#fff; z-index:1; }
+  .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:1000; align-items:center; justify-content:center; }
+  .modal-overlay.show { display:flex; }
+  .modal { background:#fff; border-radius:12px; max-width:520px; width:92%; max-height:85vh; overflow:auto; box-shadow:0 8px 32px rgba(0,0,0,.25); }
+  .modal-head { padding:12px 18px; background:var(--accent); color:#fff; border-radius:12px 12px 0 0; font-size:16px; font-weight:800; display:flex; justify-content:space-between; align-items:center; }
+  .modal-close { background:none; border:none; color:#fff; font-size:24px; cursor:pointer; }
+  .modal-body { padding:16px 18px; }
+  .modal-body .frow { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+  .modal-body .frow label { width:110px; font-size:14px; font-weight:700; flex-shrink:0; }
+  .modal-body .who { display:flex; gap:6px; flex-wrap:wrap; }
+  .modal-body .who label { display:flex; align-items:center; gap:4px; width:auto; font-weight:600; background:#f5f5f5; border-radius:14px; padding:4px 10px; cursor:pointer; }
   @media print { .header, .tabs, .btn, .att-list { display:none !important; } .page { display:none; } .page.active { display:block; } }
 </style>
 </head>
@@ -97,6 +107,20 @@
 <div class="page" id="page-members"></div>
 <div class="page" id="page-future"></div>
 <div class="toast" id="toast"></div>
+<div class="modal-overlay" id="taskModal" onclick="if(event.target===this)closeTaskModal()">
+  <div class="modal">
+    <div class="modal-head">新しい作業を登録<button class="modal-close" onclick="closeTaskModal()">&times;</button></div>
+    <div class="modal-body">
+      <div class="frow"><label>作業名</label><input type="text" id="ntName" style="flex:1" placeholder="例: 端材の片付け"></div>
+      <div class="frow"><label>単位</label><input type="text" id="ntUnit" style="width:80px" value="枚"> <span style="font-size:12px;color:#888">枚・束・本・回など（時間だけなら空欄）</span></div>
+      <div class="frow"><label>1単位の時間(分)</label><input type="number" id="ntMin" style="width:80px" value="1" step="0.1"></div>
+      <div class="frow"><label>優先度</label><select id="ntPri"><option value="1">★1 最優先</option><option value="2">★2 高</option><option value="3" selected>★3 中</option><option value="4">★4 低</option><option value="5">★5 空き時間</option></select></div>
+      <div class="frow"><label>種類</label><select id="ntType"><option value="order">受注直結</option><option value="semi">前後工程</option><option value="buffer" selected>在庫作業</option><option value="maint">保守</option><option value="office">事務</option></select></div>
+      <div class="frow" style="align-items:flex-start"><label>できる人</label><div class="who" id="ntWho"></div></div>
+      <div style="text-align:right;margin-top:14px"><button class="btn" onclick="saveNewTask()">登録する</button></div>
+    </div>
+  </div>
+</div>
 
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
@@ -137,12 +161,13 @@ const SEED_TASKS = {
   edakiri:      { seq:15, name:'枝切（コマ用）',       unit:'本', min:1,   pri:4, type:'buffer', maxW:2, source:'', note:'' },
   edashiwake:   { seq:16, name:'枝仕分け',             unit:'本', min:0.5, pri:5, type:'buffer', maxW:2, source:'', note:'' },
   jimu:         { seq:17, name:'事務全般',             unit:'',   min:0,   pri:5, type:'office', maxW:2, source:'', note:'' },
-  sonota:       { seq:18, name:'その他',               unit:'',   min:0,   pri:5, type:'office', maxW:9, source:'', note:'' }
+  sonota:       { seq:18, name:'その他',               unit:'',   min:0,   pri:5, type:'office', maxW:9, source:'', note:'' },
+  kaizen:       { seq:19, name:'AI・業務改善（開発）', unit:'',   min:0,   pri:5, type:'office', maxW:9, source:'', note:'将来への投資枠。固定枠はメンバー画面で設定' }
 };
 const ALL = Object.keys(SEED_TASKS);
 const skillsOf = (...exclude) => { const s = {}; ALL.forEach(t => { if (!exclude.includes(t)) s[t] = 1; }); return s; };
 const SEED_MEMBERS = {
-  daiki:    { seq:1, name:'大樹',     age:'', retireAge:70, hours:8, eff:100, skills: skillsOf(), note:'経理以外全般' },
+  daiki:    { seq:1, name:'大樹',     age:'', retireAge:70, hours:8, eff:100, reserveMin:120, reserveTask:'kaizen', skills: skillsOf(), note:'経理以外全般' },
   junya:    { seq:2, name:'潤也',     age:'', retireAge:70, hours:8, eff:100, skills: skillsOf('hamono_kenma','hamono_koukan'), note:'研磨・刃物交換・経理以外' },
   kaede:    { seq:3, name:'楓',       age:'', retireAge:70, hours:8, eff:100, skills: skillsOf('hamono_kenma','hamono_koukan'), note:'モルダーのセット以外（運転は可）' },
   chichi:   { seq:4, name:'父',       age:'', retireAge:75, hours:8, eff:100, skills:{ anaake:1, itahoshi:1, itayose:1, edamuki:1, edakiri:1, choshi_okuri:1, kessoku:1, sonota:1 }, note:'穴あけ専任' },
@@ -183,6 +208,7 @@ function init() {
     plan = p ? JSON.parse(JSON.stringify(p)) : plan;
     ready.g = true;
     document.getElementById('connStatus').textContent = '✓ 同期中';
+    ensureUpgrades();
     renderAll();
   }, err => {
     document.getElementById('page-today').innerHTML = '<div class="loading">genba領域にアクセスできません: ' + esc(err.message) + '<br>Firebaseのルールで genba への読み書き許可が必要です。</div>';
@@ -193,6 +219,19 @@ function init() {
     ready.k = true;
     renderAll();
   });
+}
+// 既存データに新機能のフィールドを後付け（欠けている分だけ書き込む）
+let upgraded = false;
+function ensureUpgrades() {
+  if (upgraded) return;
+  upgraded = true;
+  const ups = {};
+  if (!tasks.kaizen) ups['tasks/kaizen'] = SEED_TASKS.kaizen;
+  if (members.daiki) {
+    if (!(members.daiki.skills||{}).kaizen) ups['members/daiki/skills/kaizen'] = 1;
+    if (members.daiki.reserveMin === undefined) { ups['members/daiki/reserveMin'] = 120; ups['members/daiki/reserveTask'] = 'kaizen'; }
+  }
+  if (Object.keys(ups).length) db.ref('genba').update(ups);
 }
 function seed() {
   db.ref('genba/tasks').set(SEED_TASKS);
@@ -239,6 +278,14 @@ function autoAssign() {
     rows.push({ m: mid, t: tid, min: Math.round(min), qty: qty, note: '' });
     cap[mid] -= min;
   };
+  // まず固定枠（メンバーごとの予約時間: AI・業務改善、事務など）を確保
+  att.forEach(([mid, m]) => {
+    const rm = parseFloat(m.reserveMin)||0;
+    if (rm > 0 && cap[mid] > 0) {
+      const tid = (m.reserveTask && tasks[m.reserveTask]) ? m.reserveTask : 'sonota';
+      put(mid, tid, Math.min(rm, cap[mid]));
+    }
+  });
   // 需要リスト（優先度順）
   const demands = sortedTasks()
     .map(([id, t]) => {
@@ -301,6 +348,7 @@ let saveTimer = null;
 function savePlan(showToast) {
   if (!plan) return;
   plan.savedAt = Date.now();
+  statsCache = null; // 実績が変わったので集計を取り直す
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     db.ref('genba/plans/' + curDate()).set(plan);
@@ -375,13 +423,14 @@ function renderToday() {
     <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
       <button class="btn" onclick="autoAssign()">⚡ 自動で割振り案を作る</button>
       <button class="btn blue" onclick="addRow()">＋ 行追加</button>
+      <button class="btn blue" onclick="openTaskModal()">🛠 新しい作業を登録</button>
       <button class="btn gray" onclick="window.print()">🖨 印刷</button>
     </div>`;
   if (!plan.rows.length) {
     html += '<div class="hint">「自動で割振り案を作る」を押すと、出勤メンバー・受注残・作業待ち量から今日の案を作ります。</div>';
   } else {
     // メンバーごとにグループ表示
-    html += '<table><tr><th>担当</th><th>作業</th><th>時間</th><th>目標量</th><th>メモ</th><th>済</th><th></th></tr>';
+    html += '<table><tr><th>担当</th><th>作業</th><th>時間</th><th>目標量</th><th>実績量</th><th>実時間(分)</th><th>メモ</th><th>済</th><th></th></tr>';
     const byM = {};
     plan.rows.forEach((r, i) => { (byM[r.m] = byM[r.m]||[]).push([r, i]); });
     sortedMembers().forEach(([mid, m]) => {
@@ -395,7 +444,9 @@ function renderToday() {
         html += `<td><select onchange="editRow(${i},'t',this.value)">${opts}</select></td>
           <td><input type="number" style="width:70px" value="${r.min}" onchange="editRow(${i},'min',parseFloat(this.value)||0)"> 分</td>
           <td class="qty-big">${r.qty!=='' && r.qty!=null ? esc(r.qty)+' '+esc(tk.unit||'') : '-'}</td>
-          <td><input type="text" style="width:140px" value="${esc(r.note||'')}" onchange="editRow(${i},'note',this.value)"></td>
+          <td><input type="number" style="width:70px" value="${r.qtyDone!=null&&r.qtyDone!==''?r.qtyDone:''}" placeholder="${r.qty!==''&&r.qty!=null?r.qty:'-'}" onchange="editRow(${i},'qtyDone',this.value===''?'':parseFloat(this.value))"> ${esc(tk.unit||'')}</td>
+          <td><input type="number" style="width:70px" value="${r.minDone!=null&&r.minDone!==''?r.minDone:''}" placeholder="${r.min}" onchange="editRow(${i},'minDone',this.value===''?'':parseFloat(this.value))"></td>
+          <td><input type="text" style="width:120px" value="${esc(r.note||'')}" onchange="editRow(${i},'note',this.value)"></td>
           <td><input type="checkbox" ${r.done?'checked':''} onchange="editRow(${i},'done',this.checked?1:0)"></td>
           <td><button class="btn-del" onclick="delRow(${i})">✕</button></td></tr>`;
       });
@@ -421,6 +472,12 @@ function editRow(i, f, v) {
   if (f==='t' || f==='min') {
     const tk = tasks[plan.rows[i].t] || {};
     plan.rows[i].qty = (tk.min>0 && tk.unit && tk.unit!=='分' && tk.unit!=='') ? Math.floor((parseFloat(plan.rows[i].min)||0)/tk.min) : '';
+  }
+  // 済にしたとき実績が空なら「予定どおり」で自動記入（あとで直せる）
+  if (f==='done' && v) {
+    const r = plan.rows[i];
+    if ((r.qtyDone==null || r.qtyDone==='') && r.qty!=='' && r.qty!=null) r.qtyDone = r.qty;
+    if (r.minDone==null || r.minDone==='') r.minDone = r.min;
   }
   savePlan(true); renderToday();
 }
@@ -492,22 +549,54 @@ function renderNorma() {
       <td class="qty-big">${r.total}</td><td>${mNorm? ratio+'%':'-'}</td></tr>`;
   }
   html += '</table></div>';
+
+  // 作業別の生産量（今月）
+  html += '<div class="sec"><h2>今月の作業別実績（済にした割振りから集計）</h2>';
+  if (statsCache === null) {
+    html += '<div class="hint">集計中...</div>';
+    loadStats(() => { if (curPage==='norma') renderNorma(); });
+  } else {
+    const rows2 = sortedTasks().map(([id, t]) => {
+      const bm = statsCache[id] && statsCache[id].byMonth[ym];
+      return bm ? { name:t.name, unit:t.unit, qty:bm.qty, min:bm.min } : null;
+    }).filter(Boolean);
+    if (rows2.length) {
+      html += '<table style="max-width:700px"><tr><th>作業</th><th>生産量</th><th>かかった時間</th></tr>';
+      rows2.forEach(r => {
+        html += `<tr><td class="l">${esc(r.name)}</td><td class="qty-big">${r.qty?r.qty+' '+esc(r.unit||''):'-'}</td><td>${fmtMin(r.min)}</td></tr>`;
+      });
+      html += '</table>';
+    } else {
+      html += '<div class="hint">まだ実績がありません。今日の割振りで「済」チェック＋実績量を入れると、ここに作業ごとの生産量と時間が貯まっていきます。</div>';
+    }
+  }
+  html += '</div>';
   el.innerHTML = html;
 }
 
 // ===== 作業マスタ =====
 function renderTasks() {
   const el = document.getElementById('page-tasks');
-  let html = '<div class="sec"><h2>作業マスタ</h2><div class="hint">⚠ 「1単位の時間」は仮の値です。実際にかかった時間で直していくと割振り精度が上がります。優先度が小さいほど先に割振られます。</div>';
-  html += '<table><tr><th>順</th><th>作業名</th><th>単位</th><th>1単位の時間(分)</th><th>優先度</th><th>種類</th><th>最大人数</th><th>データ連携</th><th>メモ</th><th></th></tr>';
+  if (statsCache === null) {
+    el.innerHTML = '<div class="loading"><div class="spinner"></div>実績を集計中...</div>';
+    loadStats(() => { if (curPage==='tasks') renderTasks(); });
+    return;
+  }
+  let html = '<div class="sec"><h2>作業マスタ</h2><div class="hint">「1単位の時間」は最初は仮の値。割振り表で「済」＋実績を入れていくと「実測平均」が貯まり、「反映」ボタンで標準時間を実測値に更新できます。優先度が小さいほど先に割振られます。</div>';
+  html += '<table><tr><th>順</th><th>作業名</th><th>単位</th><th>1単位の時間(分)</th><th>実測平均<br>(分/単位)</th><th>実績<br>記録</th><th></th><th>優先度</th><th>種類</th><th>最大人数</th><th>データ連携</th><th>メモ</th><th></th></tr>';
   sortedTasks().forEach(([id, t]) => {
     const pOpts = [1,2,3,4,5].map(p=>`<option value="${p}" ${t.pri==p?'selected':''}>${PRI_LABEL[p]}</option>`).join('');
     const tyOpts = Object.entries(TYPE_LABEL).map(([k,v])=>`<option value="${k}" ${t.type===k?'selected':''}>${v}</option>`).join('');
+    const st = statsCache[id];
+    const avg = st && st.qty > 0 ? Math.round(st.min/st.qty*10)/10 : null;
     html += `<tr>
       <td contenteditable="true" onblur="tEdit('${id}','seq',parseFloat(this.textContent)||99)">${t.seq||''}</td>
       <td class="l" contenteditable="true" onblur="tEdit('${id}','name',this.textContent.trim())">${esc(t.name)}</td>
       <td contenteditable="true" onblur="tEdit('${id}','unit',this.textContent.trim())">${esc(t.unit)}</td>
       <td contenteditable="true" onblur="tEdit('${id}','min',parseFloat(this.textContent)||0)">${t.min}</td>
+      <td class="qty-big" style="color:${avg?'#2e7d32':'#bbb'}">${avg!=null?avg:'-'}</td>
+      <td style="font-size:12px;color:#888">${st?st.n+'回':'-'}</td>
+      <td>${avg!=null && avg!==t.min ? `<button class="btn sm blue" onclick="tEdit('${id}','min',${avg});toast('標準時間を実測値に更新しました')">反映</button>` : ''}</td>
       <td><select onchange="tEdit('${id}','pri',parseInt(this.value))">${pOpts}</select></td>
       <td><select onchange="tEdit('${id}','type',this.value)">${tyOpts}</select></td>
       <td contenteditable="true" onblur="tEdit('${id}','maxW',parseInt(this.textContent)||1)">${t.maxW||1}</td>
@@ -515,25 +604,73 @@ function renderTasks() {
       <td class="l" contenteditable="true" onblur="tEdit('${id}','note',this.textContent.trim())" style="font-size:12px;color:#666">${esc(t.note||'')}</td>
       <td><button class="btn-del" onclick="if(confirm('「${esc(t.name)}」を削除しますか？'))db.ref('genba/tasks/${id}').remove()">削除</button></td></tr>`;
   });
-  html += '</table><div style="margin-top:10px"><button class="btn blue" onclick="addTask()">＋ 作業を追加</button></div></div>';
+  html += '</table><div style="margin-top:10px"><button class="btn blue" onclick="openTaskModal()">＋ 作業を追加</button></div></div>';
   el.innerHTML = html;
 }
 function tEdit(id, f, v) { db.ref('genba/tasks/'+id+'/'+f).set(v); }
-function addTask() {
-  const name = prompt('作業名を入力'); if (!name) return;
+
+// ===== かんたん作業追加 =====
+function openTaskModal() {
+  const who = document.getElementById('ntWho');
+  who.innerHTML = sortedMembers().map(([id, m]) =>
+    `<label><input type="checkbox" value="${id}" checked>${esc(m.name)}</label>`).join('');
+  document.getElementById('ntName').value = '';
+  document.getElementById('taskModal').classList.add('show');
+  document.getElementById('ntName').focus();
+}
+function closeTaskModal() { document.getElementById('taskModal').classList.remove('show'); }
+function saveNewTask() {
+  const name = document.getElementById('ntName').value.trim();
+  if (!name) { toast('作業名を入れてください'); return; }
   const id = 't' + Date.now();
   const maxSeq = Math.max(0, ...Object.values(tasks).map(t=>t.seq||0));
-  db.ref('genba/tasks/'+id).set({ seq:maxSeq+1, name, unit:'枚', min:1, pri:3, type:'buffer', maxW:1, source:'', note:'' });
-  // 全員のスキルには入れない（メンバー画面でチェック）
-  toast('追加しました。メンバー画面で「できる人」にチェックを入れてください');
+  const ups = {};
+  ups['tasks/'+id] = {
+    seq: maxSeq+1, name,
+    unit: document.getElementById('ntUnit').value.trim(),
+    min: parseFloat(document.getElementById('ntMin').value)||0,
+    pri: parseInt(document.getElementById('ntPri').value)||3,
+    type: document.getElementById('ntType').value, maxW: 2, source:'', note:''
+  };
+  document.querySelectorAll('#ntWho input:checked').forEach(cb => { ups['members/'+cb.value+'/skills/'+id] = 1; });
+  db.ref('genba').update(ups);
+  closeTaskModal();
+  toast('「'+name+'」を登録しました');
+}
+
+// ===== 実績集計（済にした行の実績量・実時間から） =====
+let statsCache = null;
+function loadStats(cb) {
+  db.ref('genba/plans').once('value', s => {
+    const all = s.val()||{};
+    const agg = {};
+    Object.entries(all).forEach(([date, p]) => {
+      (p.rows||[]).forEach(r => {
+        if (!r.done) return;
+        const mn = parseFloat(r.minDone), q = parseFloat(r.qtyDone);
+        if (isNaN(mn) || mn <= 0) return;
+        const a = agg[r.t] = agg[r.t] || { qty:0, min:0, n:0, byMonth:{} };
+        a.min += mn; a.n++;
+        if (!isNaN(q) && q > 0) a.qty += q;
+        const ymKey = String(date).slice(0,7);
+        const bm = a.byMonth[ymKey] = a.byMonth[ymKey] || { qty:0, min:0 };
+        bm.min += mn;
+        if (!isNaN(q) && q > 0) bm.qty += q;
+      });
+    });
+    statsCache = agg;
+    cb(agg);
+  });
 }
 
 // ===== メンバー =====
 function renderMembers() {
   const el = document.getElementById('page-members');
   let html = '<div class="sec"><h2>メンバー</h2>';
-  html += '<table style="max-width:900px"><tr><th>順</th><th>名前</th><th>年齢</th><th>引退予定年齢</th><th>1日の稼働(h)</th><th>能率(%)</th><th>メモ</th><th></th></tr>';
+  html += '<table style="max-width:1100px"><tr><th>順</th><th>名前</th><th>年齢</th><th>引退予定年齢</th><th>1日の稼働(h)</th><th>能率(%)</th><th>固定枠(分/日)</th><th>固定枠の作業</th><th>メモ</th><th></th></tr>';
   sortedMembers().forEach(([id, m]) => {
+    const rOpts = '<option value="">-</option>' + sortedTasks().map(([tid, t]) =>
+      `<option value="${tid}" ${m.reserveTask===tid?'selected':''}>${esc(t.name)}</option>`).join('');
     html += `<tr>
       <td contenteditable="true" onblur="mEdit('${id}','seq',parseFloat(this.textContent)||99)">${m.seq||''}</td>
       <td class="l member-name" contenteditable="true" onblur="mEdit('${id}','name',this.textContent.trim())">${esc(m.name)}</td>
@@ -541,11 +678,13 @@ function renderMembers() {
       <td contenteditable="true" onblur="mEdit('${id}','retireAge',parseFloat(this.textContent)||'')">${m.retireAge||''}</td>
       <td contenteditable="true" onblur="mEdit('${id}','hours',parseFloat(this.textContent)||8)">${m.hours||8}</td>
       <td contenteditable="true" onblur="mEdit('${id}','eff',parseFloat(this.textContent)||100)">${m.eff||100}</td>
+      <td contenteditable="true" onblur="mEdit('${id}','reserveMin',parseFloat(this.textContent)||0)">${m.reserveMin||''}</td>
+      <td><select onchange="mEdit('${id}','reserveTask',this.value)">${rOpts}</select></td>
       <td class="l" contenteditable="true" onblur="mEdit('${id}','note',this.textContent.trim())" style="font-size:12px;color:#666">${esc(m.note||'')}</td>
       <td><button class="btn-del" onclick="if(confirm('「${esc(m.name)}」を削除しますか？'))db.ref('genba/members/${id}').remove()">削除</button></td></tr>`;
   });
   html += '</table><div style="margin-top:10px"><button class="btn blue" onclick="addMember()">＋ メンバーを追加</button></div>';
-  html += '<div class="hint" style="margin-top:8px">能率(%)：標準を100として。慣れてきたら110、体力的にゆっくりなら80のように。年齢・引退予定は将来シミュレーションに使います。</div></div>';
+  html += '<div class="hint" style="margin-top:8px">能率(%)：標準を100として。慣れてきたら110、体力的にゆっくりなら80のように（成長を織り込む欄）。<b>固定枠</b>：毎日必ず確保する時間。大樹のAI・業務改善や、事務・研磨の定常時間など。自動割振りが最初にこの時間を除けてから現場作業を配ります。年齢・引退予定は将来シミュレーションに使います。</div></div>';
 
   // スキルマトリクス
   html += '<div class="sec"><h2>できる作業（スキル表）</h2><div class="hint">チェックした作業だけ割振り対象になります。</div><div class="skills-scroll"><table><tr><th style="min-width:90px">名前＼作業</th>';

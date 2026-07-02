@@ -264,6 +264,9 @@ function ensureUpgrades() {
   // 商品マスタとバッファ率を後付け
   if (!Object.keys(products).length) ups['products'] = SEED_PRODUCTS;
   if (targets.bufferPct === undefined) ups['targets/bufferPct'] = 15;
+  // 穴あけ・穴埋めにペース上限の初期値（仮。実態に合わせて作業マスタで修正）
+  if (tasks.anaake && tasks.anaake.paceNorm === undefined) ups['tasks/anaake/paceNorm'] = 200;
+  if (tasks.umeki && tasks.umeki.paceNorm === undefined) ups['tasks/umeki/paceNorm'] = 100;
   // 旧「作業待ちの量」→ 優先度付き待ちリストへ移行（ストック扱い）
   if (!Object.keys(queueItems).length && Object.keys(queue).length) {
     Object.entries(queue).forEach(([tid, q]) => {
@@ -348,9 +351,13 @@ function autoAssign() {
   const stockD = demands.filter(x => x.ip >= 3).sort(byPri);
 
   const workersCount = {};   // 同じ作業の同時人数（maxW）を需要をまたいで数える
+  const usedTaskMin = {};    // 作業ごとの割振り済み分（ペース上限の管理用）
   const assign = dm => {
     let remain = dm.min;
-    const maxW = parseInt(tasks[dm.id].maxW)||1;
+    const tk = tasks[dm.id];
+    const maxW = parseInt(tk.maxW)||1;
+    // ペース上限（1日の量）→ 分に換算。食いすぎ防止で今日はここまでしか割振らない
+    const paceCapMin = (parseFloat(tk.paceNorm) > 0 && tk.min > 0) ? parseFloat(tk.paceNorm) * tk.min : Infinity;
     while (remain > 5) {
       if ((workersCount[dm.id]||0) >= maxW) break;
       // できる人のうち、残り時間が一番多い人（＝他にやることが少ない人）に割り当て
@@ -358,9 +365,12 @@ function autoAssign() {
                          .sort((a,b) => cap[b[0]] - cap[a[0]]);
       if (!capable.length) break;
       const [mid] = capable[0];
-      const alloc = Math.min(remain, cap[mid]);
+      let alloc = Math.min(remain, cap[mid]);
+      if (paceCapMin !== Infinity) alloc = Math.min(alloc, paceCapMin - (usedTaskMin[dm.id]||0));
+      if (alloc <= 5) break;
       put(mid, dm.id, alloc, dm.note, dm.qi);
       workersCount[dm.id] = (workersCount[dm.id]||0) + 1;
+      usedTaskMin[dm.id] = (usedTaskMin[dm.id]||0) + alloc;
       remain -= alloc;
     }
     // ペア作業：超仕上げ送りには受けを同じ時間つける
@@ -440,6 +450,45 @@ function renderToday() {
   const totalCap = sortedMembers().filter(([id])=>plan.att[id]).reduce((s,[,m])=>s+capMinutes(m),0);
   html += `<div class="card"><div class="c-label">今日の稼働力</div><div class="c-val">${attCount}<span style="font-size:14px"> 人</span></div><div class="c-note">計 ${fmtMin(totalCap)}</div></div>`;
   html += '</div>';
+
+  // ペース管理（1日の上限を設定した作業の食いすぎ・在庫切れチェック）
+  const paceTasks = sortedTasks().filter(([, tk]) => parseFloat(tk.paceNorm) > 0);
+  if (paceTasks.length) {
+    html += '<div class="sec"><h2>⏱ ペース管理（食いすぎ・在庫切れチェック）</h2><div class="hint">「1日の上限」は作業マスタで設定。残り在庫＝作業待ちリストの合計。自動割振りも上限で止まります。上限を超えたら⚠食いすぎ、在庫が7日分を切ったら⚠前工程を進めるサイン。</div>';
+    if (statsCache === null) {
+      html += '<div class="hint">実績を集計中...</div>';
+      loadStats(() => { if (curPage==='today') renderToday(); });
+    } else {
+      html += '<table style="max-width:1000px"><tr><th>作業</th><th>残り在庫</th><th>1日の上限</th><th>直近7日の平均消化</th><th>今日の割振り</th><th>在庫が持つ日数</th><th>判定</th></tr>';
+      paceTasks.forEach(([tid, tk]) => {
+        const stock = Object.values(queueItems).filter(q => q.t===tid).reduce((s,q) => s+(parseFloat(q.qty)||0), 0);
+        const norm = parseFloat(tk.paceNorm);
+        const bd = (statsCache[tid]||{}).byDate || {};
+        let sum7 = 0;
+        for (let i=0; i<7; i++) {
+          const d3 = new Date(); d3.setDate(d3.getDate()-i);
+          const key = d3.getFullYear()+'-'+String(d3.getMonth()+1).padStart(2,'0')+'-'+String(d3.getDate()).padStart(2,'0');
+          sum7 += bd[key]||0;
+        }
+        const avg7 = Math.round(sum7/7*10)/10;
+        const todayQty = plan.rows.filter(r => r.t===tid).reduce((s,r) => s+(parseFloat(r.qty)||0), 0);
+        const pace = avg7 > 0 ? avg7 : norm;
+        const days = pace > 0 ? Math.round(stock/pace*10)/10 : null;
+        const over = todayQty > norm;
+        const low = days !== null && days < 7;
+        const status = over ? '⚠ 食いすぎ（上限超え）' : low ? '⚠ 在庫僅少 → 前工程を進める' : '✅ 適正';
+        html += `<tr${(over||low)?' class="short"':''}><td class="l" style="font-weight:700">${esc(tk.name)}</td>
+          <td class="qty-big">${stock} ${esc(tk.unit)}</td>
+          <td>${norm} ${esc(tk.unit)}/日</td>
+          <td>${avg7} ${esc(tk.unit)}/日</td>
+          <td class="qty-big">${todayQty} ${esc(tk.unit)}</td>
+          <td>${days===null ? '-' : '約'+days+'日'}</td>
+          <td style="font-weight:700">${status}</td></tr>`;
+      });
+      html += '</table>';
+    }
+    html += '</div>';
+  }
 
   // 出勤
   html += '<div class="sec"><h2>出勤メンバー</h2><div class="att-list">';
@@ -795,8 +844,8 @@ function renderTasks() {
     loadStats(() => { if (curPage==='tasks') renderTasks(); });
     return;
   }
-  let html = '<div class="sec"><h2>作業マスタ</h2><div class="hint">「1単位の時間」は最初は仮の値。割振り表で「済」＋実績を入れていくと「実測平均」が貯まり、「反映」ボタンで標準時間を実測値に更新できます。優先度が小さいほど先に割振られます。</div>';
-  html += '<table><tr><th>順</th><th>作業名</th><th>単位</th><th>1単位の時間(分)</th><th>実測平均<br>(分/単位)</th><th>実績<br>記録</th><th></th><th>優先度</th><th>種類</th><th>最大人数</th><th>データ連携</th><th>メモ</th><th></th></tr>';
+  let html = '<div class="sec"><h2>作業マスタ</h2><div class="hint">「1単位の時間」は最初は仮の値。割振り表で「済」＋実績を入れていくと「実測平均」が貯まり、「反映」ボタンで標準時間を実測値に更新できます。優先度が小さいほど先に割振られます。<b>1日の上限</b>を入れた作業（穴あけ・穴埋めなど）は食いすぎ防止の対象になり、自動割振りが上限で止まり、今日の割振り画面にペース管理表が出ます。</div>';
+  html += '<table><tr><th>順</th><th>作業名</th><th>単位</th><th>1単位の時間(分)</th><th>実測平均<br>(分/単位)</th><th>実績<br>記録</th><th></th><th>1日の上限<br>(食いすぎ防止)</th><th>優先度</th><th>種類</th><th>最大人数</th><th>データ連携</th><th>メモ</th><th></th></tr>';
   sortedTasks().forEach(([id, t]) => {
     const pOpts = [1,2,3,4,5].map(p=>`<option value="${p}" ${t.pri==p?'selected':''}>${PRI_LABEL[p]}</option>`).join('');
     const tyOpts = Object.entries(TYPE_LABEL).map(([k,v])=>`<option value="${k}" ${t.type===k?'selected':''}>${v}</option>`).join('');
@@ -810,6 +859,7 @@ function renderTasks() {
       <td class="qty-big" style="color:${avg?'#2e7d32':'#bbb'}">${avg!=null?avg:'-'}</td>
       <td style="font-size:12px;color:#888">${st?st.n+'回':'-'}</td>
       <td>${avg!=null && avg!==t.min ? `<button class="btn sm blue" onclick="tEdit('${id}','min',${avg});toast('標準時間を実測値に更新しました')">反映</button>` : ''}</td>
+      <td contenteditable="true" onblur="tEdit('${id}','paceNorm',parseFloat(this.textContent)||0)" style="${parseFloat(t.paceNorm)>0?'background:#fff3e0;font-weight:700':''}">${parseFloat(t.paceNorm)>0?t.paceNorm:''}</td>
       <td><select onchange="tEdit('${id}','pri',parseInt(this.value))">${pOpts}</select></td>
       <td><select onchange="tEdit('${id}','type',this.value)">${tyOpts}</select></td>
       <td contenteditable="true" onblur="tEdit('${id}','maxW',parseInt(this.textContent)||1)">${t.maxW||1}</td>
@@ -862,9 +912,9 @@ function loadStats(cb) {
         if (!r.done) return;
         const mn = parseFloat(r.minDone), q = parseFloat(r.qtyDone);
         if (isNaN(mn) || mn <= 0) return;
-        const a = agg[r.t] = agg[r.t] || { qty:0, min:0, n:0, byMonth:{} };
+        const a = agg[r.t] = agg[r.t] || { qty:0, min:0, n:0, byMonth:{}, byDate:{} };
         a.min += mn; a.n++;
-        if (!isNaN(q) && q > 0) a.qty += q;
+        if (!isNaN(q) && q > 0) { a.qty += q; a.byDate[date] = (a.byDate[date]||0) + q; }
         const ymKey = String(date).slice(0,7);
         const bm = a.byMonth[ymKey] = a.byMonth[ymKey] || { qty:0, min:0 };
         bm.min += mn;

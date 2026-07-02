@@ -141,6 +141,7 @@ const db = firebase.database();
 
 const TYPE_LABEL = { order:'受注直結', semi:'前後工程', buffer:'在庫作業', maint:'保守', office:'事務' };
 const PRI_LABEL = { 1:'★1 最優先', 2:'★2 高', 3:'★3 中', 4:'★4 低', 5:'★5 空き時間' };
+const QPRI = { 1:'🔥 急ぎ（納期）', 2:'⚡ 注文分', 3:'📦 ストック' };
 
 // ===== 初期データ（初回だけ書き込み。以降は画面から編集） =====
 const SEED_TASKS = {
@@ -177,7 +178,7 @@ const SEED_MEMBERS = {
 };
 
 // ===== 状態 =====
-let tasks = {}, members = {}, queue = {}, targets = {}, actuals = {};
+let tasks = {}, members = {}, queue = {}, queueItems = {}, targets = {}, actuals = {};
 let kakouItems = [];
 let plan = null;          // 表示中日付のプラン {att:{}, rows:[]}
 let curPage = 'today';
@@ -202,7 +203,7 @@ function init() {
   db.ref('genba').on('value', snap => {
     const g = snap.val();
     if (!g || !g.tasks) { seed(); return; }
-    tasks = g.tasks || {}; members = g.members || {}; queue = g.queue || {};
+    tasks = g.tasks || {}; members = g.members || {}; queue = g.queue || {}; queueItems = g.queueItems || {};
     targets = g.targets || {}; actuals = g.actuals || {};
     const p = (g.plans||{})[curDate()];
     plan = p ? JSON.parse(JSON.stringify(p)) : plan;
@@ -230,6 +231,13 @@ function ensureUpgrades() {
   if (members.daiki) {
     if (!(members.daiki.skills||{}).kaizen) ups['members/daiki/skills/kaizen'] = 1;
     if (members.daiki.reserveMin === undefined) { ups['members/daiki/reserveMin'] = 120; ups['members/daiki/reserveTask'] = 'kaizen'; }
+  }
+  // 旧「作業待ちの量」→ 優先度付き待ちリストへ移行（ストック扱い）
+  if (!Object.keys(queueItems).length && Object.keys(queue).length) {
+    Object.entries(queue).forEach(([tid, q]) => {
+      if (parseFloat(q) > 0 && tasks[tid]) ups['queueItems/qm_' + tid] = { t: tid, qty: parseFloat(q), pri: 3, note: '' };
+    });
+    ups['queue'] = null;
   }
   if (Object.keys(ups).length) db.ref('genba').update(ups);
 }
@@ -272,13 +280,15 @@ function autoAssign() {
   const cap = {};
   att.forEach(([id, m]) => cap[id] = (parseFloat(m.hours)||8) * 60 * ((parseFloat(m.eff)||100)/100));
   const rows = [];
-  const put = (mid, tid, min) => {
+  const put = (mid, tid, min, note, qi) => {
     const t = tasks[tid];
     const qty = (t.min>0 && t.unit && t.unit!=='分' && t.unit!=='') ? Math.floor(min / t.min) : '';
-    rows.push({ m: mid, t: tid, min: Math.round(min), qty: qty, note: '' });
+    const row = { m: mid, t: tid, min: Math.round(min), qty: qty, note: note||'' };
+    if (qi) row.qi = qi;
+    rows.push(row);
     cap[mid] -= min;
   };
-  // まず固定枠（メンバーごとの予約時間: AI・業務改善、事務など）を確保
+  // ① まず固定枠（メンバーごとの予約時間: AI・業務改善、事務など）を確保
   att.forEach(([mid, m]) => {
     const rm = parseFloat(m.reserveMin)||0;
     if (rm > 0 && cap[mid] > 0) {
@@ -286,30 +296,39 @@ function autoAssign() {
       put(mid, tid, Math.min(rm, cap[mid]));
     }
   });
-  // 需要リスト（優先度順）
-  const demands = sortedTasks()
-    .map(([id, t]) => {
-      let min = 0;
-      if (t.source === 'kakou_molder') min = d.molderMin;
-      else if (t.source === 'kakou_kessoku') min = d.kessokuBundles * (t.min||4);
-      else min = (parseFloat(queue[id])||0) * (t.min||0);
-      return { id, t, min };
-    })
-    .filter(x => x.min > 0)
-    .sort((a,b) => (a.t.pri||3) - (b.t.pri||3) || (a.t.seq||99) - (b.t.seq||99));
+  // ② 需要リスト：加工予定表（自動・注文分扱い）＋ 作業待ちリスト（優先度付き）
+  const demands = [];
+  sortedTasks().forEach(([id, t]) => {
+    if (t.source === 'kakou_molder' && d.molderMin > 0) demands.push({ id, min: d.molderMin, ip: 2, note: '', qi: null });
+    else if (t.source === 'kakou_kessoku' && d.kessokuBundles > 0) demands.push({ id, min: d.kessokuBundles * (t.min||4), ip: 2, note: '', qi: null });
+  });
+  Object.entries(queueItems).forEach(([qid, q]) => {
+    const tk = tasks[q.t];
+    if (!tk) return;
+    const min = (parseFloat(q.qty)||0) * (tk.min||0);
+    if (min <= 0) return;
+    demands.push({ id: q.t, min, ip: parseInt(q.pri)||2, note: q.note||'', qi: qid });
+  });
+  // 並び順: 🔥急ぎ → ⚡注文分（作業の優先度順）。📦ストックは後回し
+  const byPri = (a,b) => a.ip - b.ip || (tasks[a.id].pri||3) - (tasks[b.id].pri||3) || (tasks[a.id].seq||99) - (tasks[b.id].seq||99);
+  const mainD  = demands.filter(x => x.ip <= 2).sort(byPri);
+  const stockD = demands.filter(x => x.ip >= 3).sort(byPri);
 
-  demands.forEach(dm => {
-    let remain = dm.min, workers = 0;
-    const maxW = parseInt(dm.t.maxW)||1;
-    while (remain > 5 && workers < maxW) {
+  const workersCount = {};   // 同じ作業の同時人数（maxW）を需要をまたいで数える
+  const assign = dm => {
+    let remain = dm.min;
+    const maxW = parseInt(tasks[dm.id].maxW)||1;
+    while (remain > 5) {
+      if ((workersCount[dm.id]||0) >= maxW) break;
       // できる人のうち、残り時間が一番多い人（＝他にやることが少ない人）に割り当て
       const capable = att.filter(([id, m]) => m.skills && m.skills[dm.id] && cap[id] > 10)
                          .sort((a,b) => cap[b[0]] - cap[a[0]]);
       if (!capable.length) break;
       const [mid] = capable[0];
       const alloc = Math.min(remain, cap[mid]);
-      put(mid, dm.id, alloc);
-      remain -= alloc; workers++;
+      put(mid, dm.id, alloc, dm.note, dm.qi);
+      workersCount[dm.id] = (workersCount[dm.id]||0) + 1;
+      remain -= alloc;
     }
     // ペア作業：超仕上げ送りには受けを同じ時間つける
     if (dm.id === 'choshi_okuri' && tasks.choshi_uke) {
@@ -319,24 +338,14 @@ function autoAssign() {
       if (need > 5) {
         const capable = att.filter(([id,m]) => m.skills && m.skills.choshi_uke && cap[id] > 10 && !usedMids.includes(id))
                            .sort((a,b) => cap[b[0]] - cap[a[0]]);
-        if (capable.length) put(capable[0][0], 'choshi_uke', Math.min(need, cap[capable[0][0]]));
+        if (capable.length) put(capable[0][0], 'choshi_uke', Math.min(need, cap[capable[0][0]]), dm.note, null);
       }
     }
-  });
-  // 空き時間 → 在庫作業（キュー未設定でも工程順で提案）
-  att.forEach(([mid, m]) => {
-    let guard = 0;
-    while (cap[mid] > 30 && guard++ < 5) {
-      const buf = sortedTasks().filter(([id, t]) =>
-        (t.type==='buffer') && m.skills && m.skills[id] &&
-        !rows.some(r => r.m===mid && r.t===id)
-      );
-      if (!buf.length) break;
-      const [tid] = buf[0];
-      put(mid, tid, cap[mid]);
-    }
-    if (cap[mid] > 30 && m.skills && m.skills.sonota) put(mid, 'sonota', cap[mid]);
-  });
+  };
+  mainD.forEach(assign);
+  // ③ 空いた時間にストック作業を消化
+  stockD.forEach(assign);
+  // ※あえて残り時間は埋めない：バーの空きが「今日の余力」。ストックリストに作業を足せば埋まる
   plan.rows = rows;
   savePlan(false);
   renderToday();
@@ -406,17 +415,31 @@ function renderToday() {
   });
   html += '</div></div>';
 
-  // 作業待ちキュー
-  html += '<div class="sec"><h2>作業待ちの量（前工程・在庫作業）</h2><div class="hint">加工予定表に載らない作業の「今たまっている量」を入れると割振りに反映されます。0なら割振り対象外。</div>';
-  html += '<table><tr><th>作業</th><th>待ち量</th><th>単位</th><th>目安時間</th></tr>';
-  sortedTasks().forEach(([id, tk]) => {
-    if (tk.source || tk.type==='office') return;
-    const q = parseFloat(queue[id])||0;
-    html += `<tr><td class="l">${esc(tk.name)}</td>
-      <td><input type="number" style="width:90px" value="${q||''}" placeholder="0" onchange="db.ref('genba/queue/${id}').set(parseFloat(this.value)||0)"></td>
-      <td>${esc(tk.unit)}</td><td>${q? fmtMin(q*(tk.min||0)) : '-'}</td></tr>`;
-  });
-  html += '</table></div>';
+  // 作業待ちリスト（優先度付き）
+  html += '<div class="sec"><h2>作業待ちリスト</h2><div class="hint">同じ作業でも優先度を分けられます。<b>🔥急ぎ</b>=納期あり・加工予定表の仕事より先に割振り ／ <b>⚡注文分</b>=通常の順番 ／ <b>📦ストック</b>=空いた時間に消化。割振りを「済」にすると残り量が自動で減ります。</div>';
+  const qEntries = Object.entries(queueItems).sort((a,b) =>
+    ((parseInt(a[1].pri)||2) - (parseInt(b[1].pri)||2)) ||
+    (((tasks[a[1].t]||{}).seq||99) - ((tasks[b[1].t]||{}).seq||99)));
+  if (qEntries.length) {
+    html += '<table><tr><th>優先度</th><th>作業</th><th>残り量</th><th>単位</th><th>目安時間</th><th>メモ（誰の分・納期など）</th><th></th></tr>';
+    qEntries.forEach(([qid, q]) => {
+      const tk = tasks[q.t]||{};
+      const priOpts = [1,2,3].map(p=>`<option value="${p}" ${(parseInt(q.pri)||2)===p?'selected':''}>${QPRI[p]}</option>`).join('');
+      const tOpts = sortedTasks().map(([tid,t2])=>`<option value="${tid}" ${tid===q.t?'selected':''}>${esc(t2.name)}</option>`).join('');
+      html += `<tr>
+        <td><select onchange="qEdit('${qid}','pri',parseInt(this.value))">${priOpts}</select></td>
+        <td><select onchange="qEdit('${qid}','t',this.value)">${tOpts}</select></td>
+        <td><input type="number" style="width:90px" value="${q.qty||''}" placeholder="0" onchange="qEdit('${qid}','qty',parseFloat(this.value)||0)"></td>
+        <td>${esc(tk.unit||'')}</td>
+        <td>${(parseFloat(q.qty)>0 && tk.min>0) ? fmtMin(q.qty*tk.min) : '-'}</td>
+        <td><input type="text" style="width:220px" value="${esc(q.note||'')}" placeholder="例: ○○様分 / 7月中" onchange="qEdit('${qid}','note',this.value)"></td>
+        <td><button class="btn-del" onclick="db.ref('genba/queueItems/${qid}').remove()">✕</button></td></tr>`;
+    });
+    html += '</table>';
+  } else {
+    html += '<div class="hint">まだ何も登録されていません。「＋ 待ち作業を追加」で、たまっている作業（板干し500枚、急ぎの結束20束など）を入れてください。</div>';
+  }
+  html += '<div style="margin-top:8px"><button class="btn blue sm" onclick="addQueueItem()">＋ 待ち作業を追加</button></div></div>';
 
   // 割振り表
   html += `<div class="sec"><h2>今日の割振り <span style="font-weight:400;font-size:12px;color:#888">${curDate()}</span></h2>
@@ -478,8 +501,22 @@ function editRow(i, f, v) {
     const r = plan.rows[i];
     if ((r.qtyDone==null || r.qtyDone==='') && r.qty!=='' && r.qty!=null) r.qtyDone = r.qty;
     if (r.minDone==null || r.minDone==='') r.minDone = r.min;
+    // 待ちリスト由来の作業なら、実績量ぶん残り量を自動で減らす（1回だけ）
+    if (r.qi && !r.qDeducted && queueItems[r.qi]) {
+      const usedQty = parseFloat(r.qtyDone)||0;
+      const left = Math.max(0, (parseFloat(queueItems[r.qi].qty)||0) - usedQty);
+      if (left > 0) db.ref('genba/queueItems/'+r.qi+'/qty').set(left);
+      else db.ref('genba/queueItems/'+r.qi).remove();
+      r.qDeducted = 1;
+    }
   }
   savePlan(true); renderToday();
+}
+function qEdit(id, f, v) { db.ref('genba/queueItems/'+id+'/'+f).set(v); }
+function addQueueItem() {
+  const firstT = sortedTasks().find(([,t]) => !t.source && t.type!=='office');
+  const id = 'q' + Date.now();
+  db.ref('genba/queueItems/'+id).set({ t: firstT ? firstT[0] : 'sonota', qty: 0, pri: 2, note: '' });
 }
 function delRow(i) { plan.rows.splice(i,1); savePlan(true); renderToday(); }
 function addRow() {

@@ -95,6 +95,7 @@
 </div>
 <div class="tabs">
   <div class="tab active" data-page="today" onclick="showPage('today')">📋 今日の割振り</div>
+  <div class="tab" data-page="products" onclick="showPage('products')">📦 商品・年間計画</div>
   <div class="tab" data-page="norma" onclick="showPage('norma')">🎯 ノルマ・進捗</div>
   <div class="tab" data-page="tasks" onclick="showPage('tasks')">🛠 作業マスタ</div>
   <div class="tab" data-page="members" onclick="showPage('members')">👥 メンバー</div>
@@ -102,6 +103,7 @@
 </div>
 
 <div class="page active" id="page-today"><div class="loading"><div class="spinner"></div>読み込み中...</div></div>
+<div class="page" id="page-products"></div>
 <div class="page" id="page-norma"></div>
 <div class="page" id="page-tasks"></div>
 <div class="page" id="page-members"></div>
@@ -176,6 +178,13 @@ const SEED_MEMBERS = {
   yamada:   { seq:6, name:'山田さん', age:65, retireAge:70, workStart:'08:00', workEnd:'15:00', eff:100, skills:{ umeki:1, pate:1, choshi_okuri:1, edamuki:1, edashiwake:1, kessoku:1, sonota:1 }, note:'パート。メイン=埋木・パテ・超仕上げ流し' },
   nakayama: { seq:7, name:'中山さん', age:72, retireAge:75, workStart:'08:00', workEnd:'15:00', eff:100, skills:{ umeki:1, pate:1, choshi_okuri:1, edamuki:1, edashiwake:1, kessoku:1, itayose:1, itahoshi:1, edakiri:1, sonota:1 }, note:'パート。山田さんの作業＋板寄せ・干す・枝切' }
 };
+// 商品マスタ（記号は加工予定表の品名と同じ。年間目標→作業ノルマへの落とし込みに使う）
+const SEED_PRODUCTS = {
+  F: { seq:1, code:'F', name:'桧フローリング(15mm)', yearTarget:0, taskMin:{ molder:4.4, kessoku:4 }, note:'' },
+  P: { seq:2, code:'P', name:'桧羽目板(12mm)',       yearTarget:0, taskMin:{ molder:4.4, kessoku:4 }, note:'' },
+  N: { seq:3, code:'N', name:'ナイスオリジナル',     yearTarget:0, taskMin:{ molder:4.4, kessoku:4 }, note:'' },
+  S: { seq:4, code:'S', name:'桧スノコ板',           yearTarget:0, taskMin:{ molder:4.4, kessoku:4 }, note:'' }
+};
 // 全員共通の休憩（勤務時間内にかかる分だけ差し引く）
 const BREAKS = [ { at: 10*60, min: 15 }, { at: 12*60, min: 45 }, { at: 15*60, min: 15 } ];
 function workMinutes(m) {   // 休憩を引いた実働（分）
@@ -192,7 +201,7 @@ function capMinutes(m) { return workMinutes(m) * ((parseFloat(m.eff)||100)/100);
 function isAbsent(m) { return !!(m.absentUntil && String(m.absentUntil) >= curDate()); }
 
 // ===== 状態 =====
-let tasks = {}, members = {}, queue = {}, queueItems = {}, targets = {}, actuals = {};
+let tasks = {}, members = {}, queue = {}, queueItems = {}, targets = {}, actuals = {}, products = {};
 let kakouItems = [];
 let plan = null;          // 表示中日付のプラン {att:{}, rows:[]}
 let curPage = 'today';
@@ -218,7 +227,7 @@ function init() {
     const g = snap.val();
     if (!g || !g.tasks) { seed(); return; }
     tasks = g.tasks || {}; members = g.members || {}; queue = g.queue || {}; queueItems = g.queueItems || {};
-    targets = g.targets || {}; actuals = g.actuals || {};
+    targets = g.targets || {}; actuals = g.actuals || {}; products = g.products || {};
     const p = (g.plans||{})[curDate()];
     plan = p ? JSON.parse(JSON.stringify(p)) : plan;
     ready.g = true;
@@ -252,6 +261,9 @@ function ensureUpgrades() {
     if (members[id] && members[id].workStart === undefined) { ups['members/'+id+'/workStart'] = se[0]; ups['members/'+id+'/workEnd'] = se[1]; }
   });
   if (members.kaede && members.kaede.absentUntil === undefined) ups['members/kaede/absentUntil'] = '2026-11-30';
+  // 商品マスタとバッファ率を後付け
+  if (!Object.keys(products).length) ups['products'] = SEED_PRODUCTS;
+  if (targets.bufferPct === undefined) ups['targets/bufferPct'] = 15;
   // 旧「作業待ちの量」→ 優先度付き待ちリストへ移行（ストック扱い）
   if (!Object.keys(queueItems).length && Object.keys(queue).length) {
     Object.entries(queue).forEach(([tid, q]) => {
@@ -264,7 +276,8 @@ function ensureUpgrades() {
 function seed() {
   db.ref('genba/tasks').set(SEED_TASKS);
   db.ref('genba/members').set(SEED_MEMBERS);
-  db.ref('genba/targets').set({ yearBundles: 4000, workDays: 245, yearHours: '' });
+  db.ref('genba/products').set(SEED_PRODUCTS);
+  db.ref('genba/targets').set({ yearBundles: 4000, workDays: 245, yearHours: '', bufferPct: 15 });
   toast('初期データを作成しました');
 }
 
@@ -414,14 +427,15 @@ function renderToday() {
   ensurePlan();
   const d = kakouDemand();
   const t = targets || {};
-  const dailyNorm = (parseFloat(t.yearBundles)||0) && (parseFloat(t.workDays)||0) ? Math.round((t.yearBundles/t.workDays)*10)/10 : null;
+  const yTarget = totalYearTarget();
+  const dailyNorm = yTarget && (parseFloat(t.workDays)||0) ? Math.round((yTarget/(parseFloat(t.workDays)||245))*10)/10 : null;
 
   let html = '';
   // 受注残サマリー
   html += '<div class="cards">';
   html += `<div class="card hl"><div class="c-label">結束待ち（加工予定表）</div><div class="c-val">${d.kessokuBundles}<span style="font-size:14px"> 束</span></div></div>`;
   html += `<div class="card hl"><div class="c-label">モルダー残</div><div class="c-val">${fmtMin(d.molderMin)}</div><div class="c-note">製造中 ${d.seizouCount}件</div></div>`;
-  if (dailyNorm) html += `<div class="card"><div class="c-label">1日の標準ペース</div><div class="c-val">${dailyNorm}<span style="font-size:14px"> 束/日</span></div><div class="c-note">年間目標${t.yearBundles}束 ÷ ${t.workDays}日</div></div>`;
+  if (dailyNorm) html += `<div class="card"><div class="c-label">1日の標準ペース</div><div class="c-val">${dailyNorm}<span style="font-size:14px"> 束/日</span></div><div class="c-note">年間目標${yTarget}束 ÷ ${parseFloat(t.workDays)||245}日</div></div>`;
   const attCount = Object.keys(plan.att).length;
   const totalCap = sortedMembers().filter(([id])=>plan.att[id]).reduce((s,[,m])=>s+capMinutes(m),0);
   html += `<div class="card"><div class="c-label">今日の稼働力</div><div class="c-val">${attCount}<span style="font-size:14px"> 人</span></div><div class="c-note">計 ${fmtMin(totalCap)}</div></div>`;
@@ -549,6 +563,139 @@ function addRow() {
   savePlan(true); renderToday();
 }
 
+// ===== 商品・年間計画 =====
+const sortedProducts = () => Object.entries(products).sort((a,b)=>(a[1].seq||99)-(b[1].seq||99));
+function bufferPct() { const b = parseFloat((targets||{}).bufferPct); return isNaN(b) ? 15 : b; }
+function totalYearTarget() {
+  const s = sortedProducts().reduce((sum,[,p]) => sum + (parseFloat(p.yearTarget)||0), 0);
+  return s > 0 ? s : (parseFloat((targets||{}).yearBundles)||0);
+}
+// 商品×作業の時間表から、作業ごとの年間必要分（バッファ込み）を計算
+function requiredMinPerTask() {
+  const req = {};
+  sortedProducts().forEach(([, p]) => {
+    const yt = parseFloat(p.yearTarget)||0;
+    if (!yt) return;
+    Object.entries(p.taskMin||{}).forEach(([tid, m]) => {
+      if (!tasks[tid]) return;
+      req[tid] = (req[tid]||0) + yt * (parseFloat(m)||0);
+    });
+  });
+  const mult = 1 + bufferPct()/100;
+  Object.keys(req).forEach(k => req[k] = req[k] * mult);
+  return req;
+}
+function annualRequiredHours() {
+  const req = requiredMinPerTask();
+  return Math.round(Object.values(req).reduce((s,v)=>s+v,0) / 60);
+}
+function annualSupplyHours() {
+  const wD = parseFloat((targets||{}).workDays)||245;
+  return Math.round(sortedMembers().reduce((s,[,m]) => s + capMinutes(m)/60*wD, 0));
+}
+// 今年の商品別実績（加工予定表の完了データから）
+function yearlyDoneByCode() {
+  const yearStr = String(new Date().getFullYear());
+  const done = {};
+  kakouItems.forEach(it => {
+    const ts = it.completed_at || it.archived_at;
+    if (!ts) return;
+    if (String(new Date(ts).getFullYear()) !== yearStr) return;
+    const a = parseFloat(it.actual), p = parseFloat(it.planned);
+    const b = !isNaN(a) ? a : (isNaN(p) ? 0 : p);
+    const code = it.hinmei || '?';
+    done[code] = (done[code]||0) + b;
+  });
+  return done;
+}
+function pEdit(id, f, v) { db.ref('genba/products/'+id+'/'+f).set(v); }
+function addProduct() {
+  const name = prompt('商品名を入力'); if (!name) return;
+  const id = 'p' + Date.now();
+  const maxSeq = Math.max(0, ...Object.values(products).map(p=>p.seq||0));
+  db.ref('genba/products/'+id).set({ seq:maxSeq+1, code:'', name, yearTarget:0, taskMin:{}, note:'' });
+}
+function renderProducts() {
+  const el = document.getElementById('page-products');
+  const t = targets||{};
+  const wD = parseFloat(t.workDays)||245;
+  const done = yearlyDoneByCode();
+  const thisYear = new Date().getFullYear();
+  const dayOfYear = Math.floor((new Date() - new Date(thisYear,0,1)) / 86400000) + 1;
+  const yearPct = Math.round(dayOfYear/365*100);
+
+  let html = '<div class="sec"><h2>年間計画の設定</h2>';
+  html += `<div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
+    <span>年間稼働日数 <input type="number" style="width:80px" value="${wD}" onchange="db.ref('genba/targets/workDays').set(parseFloat(this.value)||245)"> 日</span>
+    <span>バッファ <input type="number" style="width:70px" value="${bufferPct()}" onchange="db.ref('genba/targets/bufferPct').set(parseFloat(this.value)||0)"> %</span>
+  </div>
+  <div class="hint">バッファ＝突発対応・機械トラブル・体調などの余裕率。必要工数にこの分を上乗せして労働力と比べます（15〜20%推奨）。</div></div>`;
+
+  // 商品別 年間目標と実績
+  html += '<div class="sec"><h2>商品別の年間目標</h2><div class="hint">記号は加工予定表の品名と同じ。目標束数は市場・EC・その他の合計で入れてください（内訳はメモへ）。過去の出荷量データから適正値を出したいときは Claude に「納品書データから年間出荷量を分析して」と頼めます。</div>';
+  html += '<table style="max-width:1000px"><tr><th>記号</th><th>商品名</th><th>年間目標(束)</th><th>今年の実績(束)</th><th>進捗</th><th>メモ（市場/EC内訳など）</th><th></th></tr>';
+  sortedProducts().forEach(([id, p]) => {
+    const yt = parseFloat(p.yearTarget)||0;
+    const dn = Math.round(done[p.code]||0);
+    const pct = yt ? Math.round(dn/yt*100) : null;
+    const onPace = pct !== null && pct >= yearPct;
+    html += `<tr>
+      <td contenteditable="true" onblur="pEdit('${id}','code',this.textContent.trim())" style="font-weight:800">${esc(p.code||'')}</td>
+      <td class="l" contenteditable="true" onblur="pEdit('${id}','name',this.textContent.trim())">${esc(p.name)}</td>
+      <td><input type="number" style="width:90px" value="${yt||''}" onchange="pEdit('${id}','yearTarget',parseFloat(this.value)||0)"></td>
+      <td class="qty-big">${dn}</td>
+      <td style="${pct===null?'':'font-weight:700;color:'+(onPace?'#2e7d32':'#e65100')}">${pct===null?'-':pct+'%'+(onPace?' 👍':' ⚠')}</td>
+      <td class="l" contenteditable="true" onblur="pEdit('${id}','note',this.textContent.trim())" style="font-size:12px;color:#666">${esc(p.note||'')}</td>
+      <td><button class="btn-del" onclick="if(confirm('「${esc(p.name)}」を削除しますか？'))db.ref('genba/products/${id}').remove()">削除</button></td></tr>`;
+  });
+  html += `</table><div class="hint" style="margin-top:6px">年の経過 ${yearPct}%。進捗がこれを上回っていればペース内。</div>`;
+  html += '<div style="margin-top:8px"><button class="btn blue sm" onclick="addProduct()">＋ 商品を追加</button></div></div>';
+
+  // 商品×作業の時間表
+  const matrixTasks = sortedTasks().filter(([id, tk]) => tk.type==='order' || tk.type==='semi' || tk.type==='buffer');
+  html += '<div class="sec"><h2>商品×作業の時間表（1束あたり・分）</h2><div class="hint">「この商品を1束作るのに、この作業が何分かかるか」。関係ない作業は空欄のまま。ここを埋めると年間目標から作業ごとの必要工数が自動計算されます。実測平均（作業マスタ）を参考に。</div>';
+  html += '<div class="skills-scroll"><table><tr><th style="min-width:130px">商品＼作業</th>';
+  matrixTasks.forEach(([, tk]) => { html += `<th class="rot"><div>${esc(tk.name)}</div></th>`; });
+  html += '</tr>';
+  sortedProducts().forEach(([pid, p]) => {
+    html += `<tr><td class="l member-name">${esc(p.code||'')} ${esc(p.name)}</td>`;
+    matrixTasks.forEach(([tid]) => {
+      const v = (p.taskMin||{})[tid];
+      html += `<td><input type="number" step="0.1" style="width:56px" value="${v!=null?v:''}" onchange="db.ref('genba/products/${pid}/taskMin/${tid}').set(this.value===''?null:parseFloat(this.value)||0)"></td>`;
+    });
+    html += '</tr>';
+  });
+  html += '</table></div></div>';
+
+  // 作業別の必要工数（バッファ込み）
+  const req = requiredMinPerTask();
+  const reqTotal = annualRequiredHours();
+  const supply = annualSupplyHours();
+  const fill = reqTotal ? Math.round(supply/reqTotal*100) : null;
+  html += '<div class="sec"><h2>作業別ノルマ（年間目標×時間表から自動計算・バッファ' + bufferPct() + '%込み）</h2>';
+  if (Object.keys(req).length) {
+    html += '<table style="max-width:750px"><tr><th>作業</th><th>年間必要時間</th><th>1日あたり</th><th>月あたり</th></tr>';
+    sortedTasks().forEach(([tid, tk]) => {
+      if (!req[tid]) return;
+      html += `<tr><td class="l">${esc(tk.name)}</td>
+        <td>${Math.round(req[tid]/60).toLocaleString()} 時間</td>
+        <td class="qty-big">${fmtMin(req[tid]/wD)}</td>
+        <td>${fmtMin(req[tid]/12)}</td></tr>`;
+    });
+    html += '</table>';
+    html += '<div class="cards" style="margin-top:12px">';
+    html += `<div class="card"><div class="c-label">年間必要工数（バッファ込み）</div><div class="c-val">${reqTotal.toLocaleString()}<span style="font-size:14px"> h</span></div></div>`;
+    html += `<div class="card"><div class="c-label">年間労働力（現メンバー）</div><div class="c-val">${supply.toLocaleString()}<span style="font-size:14px"> h</span></div></div>`;
+    html += `<div class="card ${fill>=100?'hl':'warn'}"><div class="c-label">充足率</div><div class="c-val">${fill}%</div><div class="c-note">${fill>=100?'労働力は足りています。余力は'+(supply-reqTotal).toLocaleString()+'h/年':'⚠ 不足。残業・応援・目標調整が必要'}</div></div>`;
+    html += '</div>';
+    html += '<div class="hint">※労働力は育休なども含む全員分の単純計算。余力＝ストック作り・改善・営業に回せる時間。</div>';
+  } else {
+    html += '<div class="hint">年間目標（束）と時間表を入れると、ここに作業ごとの必要工数と充足率が出ます。</div>';
+  }
+  html += '</div>';
+  el.innerHTML = html;
+}
+
 // ===== ノルマ・進捗 =====
 function monthDone(ym) {
   // 加工予定表の完了日時から当月の束数を集計 ＋ 手動補正
@@ -568,17 +715,24 @@ function monthDone(ym) {
 function renderNorma() {
   const el = document.getElementById('page-norma');
   const t = targets || {};
-  const yB = parseFloat(t.yearBundles)||0, wD = parseFloat(t.workDays)||245;
+  const prodSum = sortedProducts().reduce((s,[,p])=>s+(parseFloat(p.yearTarget)||0),0);
+  const yB = totalYearTarget(), wD = parseFloat(t.workDays)||245;
   const now = new Date();
   const ym = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0');
   const mNorm = yB ? Math.round(yB/12) : 0;
   const dNorm = yB && wD ? Math.round(yB/wD*10)/10 : 0;
   const md = monthDone(ym);
 
-  let html = '<div class="sec"><h2>年間目標の設定</h2><div class="hint">まずは年間の出荷量（束数）目標と稼働日数を入れてください。月ノルマ・日ノルマは自動計算します。</div>';
-  html += `<table style="max-width:560px"><tr><th>年間目標（束）</th><th>年間稼働日数</th></tr><tr>
-    <td><input type="number" style="width:110px" value="${yB||''}" onchange="db.ref('genba/targets/yearBundles').set(parseFloat(this.value)||0)"></td>
-    <td><input type="number" style="width:110px" value="${wD||''}" onchange="db.ref('genba/targets/workDays').set(parseFloat(this.value)||245)"></td></tr></table></div>`;
+  let html = '<div class="sec"><h2>年間目標の設定</h2>';
+  if (prodSum > 0) {
+    html += `<div class="hint">年間目標は<b>商品・年間計画タブの商品別目標の合計＝${prodSum.toLocaleString()}束</b>を使っています（商品別に入れるとこちらが優先）。</div>`;
+  } else {
+    html += '<div class="hint">まずは年間の出荷量（束数）目標と稼働日数を入れてください。商品別に管理するなら「商品・年間計画」タブへ。</div>';
+    html += `<table style="max-width:560px"><tr><th>年間目標（束）</th><th>年間稼働日数</th></tr><tr>
+      <td><input type="number" style="width:110px" value="${parseFloat(t.yearBundles)||''}" onchange="db.ref('genba/targets/yearBundles').set(parseFloat(this.value)||0)"></td>
+      <td><input type="number" style="width:110px" value="${wD||''}" onchange="db.ref('genba/targets/workDays').set(parseFloat(this.value)||245)"></td></tr></table>`;
+  }
+  html += '</div>';
 
   html += '<div class="cards">';
   html += `<div class="card hl"><div class="c-label">月ノルマ</div><div class="c-val">${mNorm}<span style="font-size:14px"> 束</span></div></div>`;
@@ -789,10 +943,11 @@ function renderFuture() {
     return { h: Math.round(h), gone };
   };
   const base = supplyAt(0).h;
-  const reqH = parseFloat(t.yearHours) || base;
+  const autoReq = annualRequiredHours();
+  const reqH = parseFloat(t.yearHours) || (autoReq > 0 ? autoReq : base);
 
   let html = '<div class="sec"><h2>人員の将来シミュレーション</h2><div class="hint">年齢と引退予定年齢（メンバー画面で入力）から、この先10年の労働力を試算します。年齢が未入力の人は常に在籍として計算します。</div>';
-  html += `<div style="margin-bottom:10px">年間に必要な工数（時間）: <input type="number" style="width:120px" value="${parseFloat(t.yearHours)||''}" placeholder="${base}" onchange="db.ref('genba/targets/yearHours').set(parseFloat(this.value)||'')"> <span class="hint" style="display:inline">空欄なら現在の総力（${base.toLocaleString()}時間/年）を基準にします</span></div>`;
+  html += `<div style="margin-bottom:10px">年間に必要な工数（時間）: <input type="number" style="width:120px" value="${parseFloat(t.yearHours)||''}" placeholder="${autoReq>0?autoReq:base}" onchange="db.ref('genba/targets/yearHours').set(parseFloat(this.value)||'')"> <span class="hint" style="display:inline">${autoReq>0 ? '空欄なら商品・年間計画から自動計算（バッファ込み '+autoReq.toLocaleString()+'時間/年）' : '空欄なら現在の総力（'+base.toLocaleString()+'時間/年）を基準にします'}</span></div>`;
   html += '<table style="max-width:900px"><tr><th>年</th><th>労働力（時間/年）</th><th>必要量に対して</th><th>その年までに引退</th></tr>';
   for (let y=0; y<=10; y++) {
     const s = supplyAt(y);
@@ -816,6 +971,7 @@ function showPage(p) {
 function renderAll() {
   if (!ready.g) return;
   if (curPage==='today') renderToday();
+  else if (curPage==='products') renderProducts();
   else if (curPage==='norma') renderNorma();
   else if (curPage==='tasks') renderTasks();
   else if (curPage==='members') renderMembers();

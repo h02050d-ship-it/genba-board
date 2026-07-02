@@ -317,13 +317,13 @@ function onDateChange() {
 
 // ===== 今日の割振り画面 =====
 function ensurePlan() {
-  if (!plan) {
-    const att = {};
-    sortedMembers().forEach(([id]) => att[id] = 1);
-    plan = { att, rows: [] };
-  }
+  if (!plan) plan = { att: {}, rows: [] };
   if (!plan.att) plan.att = {};
   if (!plan.rows) plan.rows = [];
+  // まだ誰も出勤設定がなく割振りもしていない日は、全員出勤を初期値にする
+  if (!Object.keys(plan.att).length && !plan.rows.length && Object.keys(members).length) {
+    sortedMembers().forEach(([id]) => plan.att[id] = 1);
+  }
 }
 function toggleAtt(mid) {
   ensurePlan();

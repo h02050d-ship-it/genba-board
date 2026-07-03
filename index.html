@@ -355,6 +355,8 @@ function autoAssign() {
   sortedTasks().forEach(([id, t]) => {
     if (t.source === 'kakou_molder' && d.molderMin > 0) demands.push({ id, min: d.molderMin, ip: 2, note: '', qi: null });
     else if (t.source === 'kakou_kessoku' && d.kessokuBundles > 0) demands.push({ id, min: d.kessokuBundles * (t.min||4), ip: 2, note: '', qi: null });
+    // パテ: モルダーと同時間×2人×丸節率(約85%) → モルダー残に連動して自動計算
+    else if (t.source === 'kakou_pate' && d.molderMin > 0) demands.push({ id, min: Math.round(d.molderMin * 1.7), ip: 2, note: 'モルダー連動', qi: null });
   });
   Object.entries(queueItems).forEach(([qid, q]) => {
     const tk = tasks[q.t];
@@ -890,7 +892,7 @@ function renderTasks() {
       <td><select onchange="tEdit('${id}','pri',parseInt(this.value))">${pOpts}</select></td>
       <td><select onchange="tEdit('${id}','type',this.value)">${tyOpts}</select></td>
       <td contenteditable="true" onblur="tEdit('${id}','maxW',parseInt(this.textContent)||1)">${t.maxW||1}</td>
-      <td style="font-size:11px;color:#888">${t.source==='kakou_molder'?'加工予定表(モルダー)':t.source==='kakou_kessoku'?'加工予定表(結束)':'手入力キュー'}</td>
+      <td style="font-size:11px;color:#888">${t.source==='kakou_molder'?'加工予定表(モルダー)':t.source==='kakou_kessoku'?'加工予定表(結束)':t.source==='kakou_pate'?'モルダー連動(×2人×丸節率85%)':'手入力キュー'}</td>
       <td class="l" contenteditable="true" onblur="tEdit('${id}','note',this.textContent.trim())" style="font-size:12px;color:#666">${esc(t.note||'')}</td>
       <td><button class="btn-del" onclick="if(confirm('「${esc(t.name)}」を削除しますか？'))db.ref('genba/tasks/${id}').remove()">削除</button></td></tr>`;
   });

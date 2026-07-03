@@ -199,6 +199,15 @@ function workMinutes(m) {   // 休憩を引いた実働（分）
 }
 function capMinutes(m) { return workMinutes(m) * ((parseFloat(m.eff)||100)/100); }
 function isAbsent(m) { return !!(m.absentUntil && String(m.absentUntil) >= curDate()); }
+function weekdayJp(dateStr) { return ['日','月','火','水','木','金','土'][new Date(dateStr + 'T00:00:00').getDay()]; }
+function isOffToday(m) { return String(m.offDays||'').includes(weekdayJp(curDate())); }
+// 作業の「優先担当」欄（名前かIDをカンマ区切り）をメンバーIDに解決
+function ownerIds(t) {
+  return String(t.owners||'').split(/[,、・\s]+/).filter(Boolean).map(tok => {
+    const hit = Object.entries(members).find(([id, m]) => id === tok || (m.name||'') === tok);
+    return hit ? hit[0] : null;
+  }).filter(Boolean);
+}
 
 // ===== 状態 =====
 let tasks = {}, members = {}, queue = {}, queueItems = {}, targets = {}, actuals = {}, products = {};
@@ -332,6 +341,15 @@ function autoAssign() {
       put(mid, tid, Math.min(rm, cap[mid]));
     }
   });
+  // ①' 毎日の定常作業（モルダー刃物交換・研磨など、dailyMinを設定した作業を優先担当に）
+  sortedTasks().forEach(([tid, t]) => {
+    const dmin = parseFloat(t.dailyMin)||0;
+    if (dmin <= 0) return;
+    const ow = ownerIds(t);
+    const cand = att.filter(([id, m]) => (ow.length ? ow.includes(id) : (m.skills && m.skills[tid])) && cap[id] > 0)
+                    .sort((a,b) => cap[b[0]] - cap[a[0]]);
+    if (cand.length) put(cand[0][0], tid, Math.min(dmin, cap[cand[0][0]]));
+  });
   // ② 需要リスト：加工予定表（自動・注文分扱い）＋ 作業待ちリスト（優先度付き）
   const demands = [];
   sortedTasks().forEach(([id, t]) => {
@@ -360,9 +378,10 @@ function autoAssign() {
     const paceCapMin = (parseFloat(tk.paceNorm) > 0 && tk.min > 0) ? parseFloat(tk.paceNorm) * tk.min : Infinity;
     while (remain > 5) {
       if ((workersCount[dm.id]||0) >= maxW) break;
-      // できる人のうち、残り時間が一番多い人（＝他にやることが少ない人）に割り当て
+      // できる人のうち、優先担当を最優先、次に残り時間が多い人に割り当て
+      const ow = ownerIds(tk);
       const capable = att.filter(([id, m]) => m.skills && m.skills[dm.id] && cap[id] > 10)
-                         .sort((a,b) => cap[b[0]] - cap[a[0]]);
+                         .sort((a,b) => ((ow.includes(b[0])?1:0) - (ow.includes(a[0])?1:0)) || (cap[b[0]] - cap[a[0]]));
       if (!capable.length) break;
       const [mid] = capable[0];
       let alloc = Math.min(remain, cap[mid]);
@@ -420,9 +439,9 @@ function ensurePlan() {
   if (!plan) plan = { att: {}, rows: [] };
   if (!plan.att) plan.att = {};
   if (!plan.rows) plan.rows = [];
-  // まだ誰も出勤設定がなく割振りもしていない日は、全員出勤を初期値にする（休業中の人は除く）
+  // まだ誰も出勤設定がなく割振りもしていない日は、全員出勤を初期値にする（休業中・定休日の人は除く）
   if (!Object.keys(plan.att).length && !plan.rows.length && Object.keys(members).length) {
-    sortedMembers().forEach(([id, m]) => { if (!isAbsent(m)) plan.att[id] = 1; });
+    sortedMembers().forEach(([id, m]) => { if (!isAbsent(m) && !isOffToday(m)) plan.att[id] = 1; });
   }
 }
 function toggleAtt(mid) {
@@ -495,8 +514,9 @@ function renderToday() {
   sortedMembers().forEach(([id, m]) => {
     const on = !!plan.att[id];
     const ab = isAbsent(m) ? ' <span style="font-size:11px;opacity:.8">🍼休業中</span>' : '';
+    const off = !isAbsent(m) && isOffToday(m) ? ' <span style="font-size:11px;opacity:.8">📅定休</span>' : '';
     const wk = m.workStart && m.workEnd ? ` <span style="font-size:11px;opacity:.7">${esc(m.workStart)}〜${esc(m.workEnd)}</span>` : '';
-    html += `<div class="att-chip ${on?'on':'off'}" onclick="toggleAtt('${id}')">${on?'✓':'－'} ${esc(m.name)}${wk}${ab}</div>`;
+    html += `<div class="att-chip ${on?'on':'off'}" onclick="toggleAtt('${id}')">${on?'✓':'－'} ${esc(m.name)}${wk}${ab}${off}</div>`;
   });
   html += '</div></div>';
 
@@ -850,7 +870,7 @@ function renderTasks() {
     return;
   }
   let html = '<div class="sec"><h2>作業マスタ</h2><div class="hint">「1単位の時間」は最初は仮の値。割振り表で「済」＋実績を入れていくと「実測平均」が貯まり、「反映」ボタンで標準時間を実測値に更新できます。優先度が小さいほど先に割振られます。<b>1日の上限</b>を入れた作業（穴あけ・穴埋めなど）は食いすぎ防止の対象になり、自動割振りが上限で止まり、今日の割振り画面にペース管理表が出ます。</div>';
-  html += '<table><tr><th>順</th><th>作業名</th><th>単位</th><th>1単位の時間(分)</th><th>実測平均<br>(分/単位)</th><th>実績<br>記録</th><th></th><th>1日の上限<br>(食いすぎ防止)</th><th>優先度</th><th>種類</th><th>最大人数</th><th>データ連携</th><th>メモ</th><th></th></tr>';
+  html += '<table><tr><th>順</th><th>作業名</th><th>単位</th><th>1単位の時間(分)</th><th>実測平均<br>(分/単位)</th><th>実績<br>記録</th><th></th><th>1日の上限<br>(食いすぎ防止)</th><th>優先担当</th><th>毎日の定常<br>(分/日)</th><th>優先度</th><th>種類</th><th>最大人数</th><th>データ連携</th><th>メモ</th><th></th></tr>';
   sortedTasks().forEach(([id, t]) => {
     const pOpts = [1,2,3,4,5].map(p=>`<option value="${p}" ${t.pri==p?'selected':''}>${PRI_LABEL[p]}</option>`).join('');
     const tyOpts = Object.entries(TYPE_LABEL).map(([k,v])=>`<option value="${k}" ${t.type===k?'selected':''}>${v}</option>`).join('');
@@ -865,6 +885,8 @@ function renderTasks() {
       <td style="font-size:12px;color:#888">${st?st.n+'回':'-'}</td>
       <td>${avg!=null && avg!==t.min ? `<button class="btn sm blue" onclick="tEdit('${id}','min',${avg});toast('標準時間を実測値に更新しました')">反映</button>` : ''}</td>
       <td contenteditable="true" onblur="tEdit('${id}','paceNorm',parseFloat(this.textContent)||0)" style="${parseFloat(t.paceNorm)>0?'background:#fff3e0;font-weight:700':''}">${parseFloat(t.paceNorm)>0?t.paceNorm:''}</td>
+      <td contenteditable="true" onblur="tEdit('${id}','owners',this.textContent.trim())" style="font-size:12px">${esc(t.owners||'')}</td>
+      <td contenteditable="true" onblur="tEdit('${id}','dailyMin',parseFloat(this.textContent)||0)" style="${parseFloat(t.dailyMin)>0?'background:#e3f2fd;font-weight:700':''}">${parseFloat(t.dailyMin)>0?t.dailyMin:''}</td>
       <td><select onchange="tEdit('${id}','pri',parseInt(this.value))">${pOpts}</select></td>
       <td><select onchange="tEdit('${id}','type',this.value)">${tyOpts}</select></td>
       <td contenteditable="true" onblur="tEdit('${id}','maxW',parseInt(this.textContent)||1)">${t.maxW||1}</td>
@@ -935,7 +957,7 @@ function loadStats(cb) {
 function renderMembers() {
   const el = document.getElementById('page-members');
   let html = '<div class="sec"><h2>メンバー</h2>';
-  html += '<table style="max-width:1250px"><tr><th>順</th><th>名前</th><th>年齢</th><th>引退予定年齢</th><th>出勤</th><th>退勤</th><th>実働</th><th>能率(%)</th><th>固定枠(分/日)</th><th>固定枠の作業</th><th>休業中(〜日付)</th><th>メモ</th><th></th></tr>';
+  html += '<table style="max-width:1350px"><tr><th>順</th><th>名前</th><th>年齢</th><th>引退予定年齢</th><th>出勤</th><th>退勤</th><th>実働</th><th>能率(%)</th><th>定休日</th><th>固定枠(分/日)</th><th>固定枠の作業</th><th>休業中(〜日付)</th><th>メモ</th><th></th></tr>';
   sortedMembers().forEach(([id, m]) => {
     const rOpts = '<option value="">-</option>' + sortedTasks().map(([tid, t]) =>
       `<option value="${tid}" ${m.reserveTask===tid?'selected':''}>${esc(t.name)}</option>`).join('');
@@ -948,6 +970,7 @@ function renderMembers() {
       <td><input type="time" value="${esc(m.workEnd||'')}" onchange="mEdit('${id}','workEnd',this.value)"></td>
       <td style="font-weight:700">${fmtMin(workMinutes(m))}</td>
       <td contenteditable="true" onblur="mEdit('${id}','eff',parseFloat(this.textContent)||100)">${m.eff||100}</td>
+      <td contenteditable="true" onblur="mEdit('${id}','offDays',this.textContent.trim())" style="${m.offDays?'background:#fff3e0;font-weight:700':''}">${esc(m.offDays||'')}</td>
       <td contenteditable="true" onblur="mEdit('${id}','reserveMin',parseFloat(this.textContent)||0)">${m.reserveMin||''}</td>
       <td><select onchange="mEdit('${id}','reserveTask',this.value)">${rOpts}</select></td>
       <td contenteditable="true" onblur="mEdit('${id}','absentUntil',this.textContent.trim())" style="font-size:12px;${isAbsent(m)?'background:#fff3e0;font-weight:700':''}">${esc(m.absentUntil||'')}</td>
@@ -960,9 +983,9 @@ function renderMembers() {
   const absentNames = sortedMembers().filter(([,m])=>isAbsent(m)).map(([,m])=>m.name).join('・');
   html += `<tr style="background:#e8f5e9;font-weight:800">
     <td colspan="6" class="l">合計（今使える戦力／1日）${absentNames?`<span style="font-weight:400;font-size:11px;color:#888">　休業中: ${esc(absentNames)} は除外</span>`:''}</td>
-    <td>${fmtMin(actMin)}</td><td colspan="6" class="l" style="font-weight:400;color:#666">${allMin>actMin?`復帰後(全員): <b>${fmtMin(allMin)}</b>（+${fmtMin(allMin-actMin)}）`:''}</td></tr>`;
+    <td>${fmtMin(actMin)}</td><td colspan="7" class="l" style="font-weight:400;color:#666">${allMin>actMin?`復帰後(全員): <b>${fmtMin(allMin)}</b>（+${fmtMin(allMin-actMin)}）`:''}</td></tr>`;
   html += '</table><div style="margin-top:10px"><button class="btn blue" onclick="addMember()">＋ メンバーを追加</button></div>';
-  html += '<div class="hint" style="margin-top:8px">実働＝出勤〜退勤から勤務時間内の休憩（10:00に15分・12:00に45分・15:00に15分）を自動で差し引いた時間。能率(%)：標準を100として、慣れてきたら110、体力的にゆっくりなら80のように（成長を織り込む欄）。<b>固定枠</b>：毎日必ず確保する時間（大樹のAI・業務改善など）。<b>休業中</b>：日付（例 2026-11-30）を入れると、その日まで出勤の初期値から外れます。年齢・引退予定は将来シミュレーションに使います。</div></div>';
+  html += '<div class="hint" style="margin-top:8px">実働＝出勤〜退勤から勤務時間内の休憩（10:00に15分・12:00に45分・15:00に15分）を自動で差し引いた時間。能率(%)：標準を100として、慣れてきたら110、体力的にゆっくりなら80のように（成長を織り込む欄）。<b>固定枠</b>：毎日必ず確保する時間（大樹のAI・業務改善など）。<b>定休日</b>：「月木」のように曜日を入れると、その曜日は出勤の初期値から外れます（チップを押せばその日だけ出勤にできます）。<b>休業中</b>：日付（例 2026-11-30）を入れると、その日まで出勤の初期値から外れます。年齢・引退予定は将来シミュレーションに使います。</div></div>';
 
   // スキルマトリクス
   html += '<div class="sec"><h2>できる作業（スキル表）</h2><div class="hint">チェックした作業だけ割振り対象になります。</div><div class="skills-scroll"><table><tr><th style="min-width:90px">名前＼作業</th>';

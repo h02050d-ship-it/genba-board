@@ -565,12 +565,16 @@ function renderToday() {
     plan.rows.forEach((r, i) => { (byM[r.m] = byM[r.m]||[]).push([r, i]); });
     sortedMembers().forEach(([mid, m]) => {
       const rs = byM[mid]; if (!rs) return;
-      rs.forEach(([r, i], j) => {
+      rs.forEach(([r, i]) => {
         const tk = tasks[r.t] || {};
-        const opts = sortedTasks().filter(([tid]) => (members[mid].skills||{})[tid]).map(([tid, t2]) =>
+        // 担当プルダウン（出勤メンバー＋現在の担当）
+        const mOpts = sortedMembers().filter(([id2]) => plan.att[id2] || id2===mid).map(([id2, m2]) =>
+          `<option value="${id2}" ${id2===mid?'selected':''}>${esc(m2.name)}</option>`).join('');
+        // 作業プルダウン（担当のできる作業＋現在の作業）
+        const opts = sortedTasks().filter(([tid]) => (members[mid].skills||{})[tid] || tid===r.t).map(([tid, t2]) =>
           `<option value="${tid}" ${tid===r.t?'selected':''}>${esc(t2.name)}</option>`).join('');
         html += `<tr ${r.done?'style="opacity:.45"':''}>`;
-        if (j===0) html += `<td class="member-name" rowspan="${rs.length}">${esc(m.name)}</td>`;
+        html += `<td><select style="font-weight:800" onchange="editRow(${i},'m',this.value)">${mOpts}</select></td>`;
         html += `<td><select onchange="editRow(${i},'t',this.value)">${opts}</select></td>
           <td><input type="number" style="width:70px" value="${r.min}" onchange="editRow(${i},'min',parseFloat(this.value)||0)"> 分</td>
           <td class="qty-big">${r.qty!=='' && r.qty!=null ? esc(r.qty)+' '+esc(tk.unit||'') : '-'}</td>

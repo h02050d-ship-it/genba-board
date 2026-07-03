@@ -582,9 +582,15 @@ function renderToday() {
       });
     });
     html += '</table>';
-    // 負荷バー
+    // 負荷バー（休みの人は薄く表示）
     html += '<div style="margin-top:12px">';
-    sortedMembers().filter(([id])=>plan.att[id]).forEach(([mid, m]) => {
+    sortedMembers().forEach(([mid, m]) => {
+      if (!plan.att[mid]) {
+        const why = isAbsent(m) ? '🍼休業中' : isOffToday(m) ? '📅定休' : '休み';
+        html += `<div style="display:flex;align-items:center;gap:8px;opacity:.4"><span style="width:70px;font-size:13px;font-weight:700">${esc(m.name)}</span>
+          <div class="bar-wrap" style="flex:1"><div class="bar-label">${why}</div></div></div>`;
+        return;
+      }
       const capMin = capMinutes(m);
       const used = plan.rows.filter(r=>r.m===mid).reduce((s,r)=>s+(parseFloat(r.min)||0),0);
       const pct = Math.min(100, Math.round(used/capMin*100));

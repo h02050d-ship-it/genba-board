@@ -586,7 +586,7 @@ function renderToday() {
       });
     });
     html += '</table>';
-    // 負荷バー（出勤者を上に、休みの人は一番下に薄く）
+    // 負荷バー（出勤している人だけ表示）
     html += '<div style="margin-top:12px">';
     sortedMembers().filter(([mid]) => plan.att[mid]).forEach(([mid, m]) => {
       const capMin = capMinutes(m);
@@ -595,11 +595,6 @@ function renderToday() {
       html += `<div style="display:flex;align-items:center;gap:8px"><span style="width:70px;font-size:13px;font-weight:700">${esc(m.name)}</span>
         <div class="bar-wrap" style="flex:1"><div class="bar ${used>capMin?'over':''}" style="width:${pct}%"></div>
         <div class="bar-label">${fmtMin(used)} / ${fmtMin(capMin)}（${Math.round(used/capMin*100)}%）</div></div></div>`;
-    });
-    sortedMembers().filter(([mid]) => !plan.att[mid]).forEach(([mid, m]) => {
-      const why = isAbsent(m) ? '🍼休業中' : isOffToday(m) ? '📅定休' : '休み';
-      html += `<div style="display:flex;align-items:center;gap:8px;opacity:.4"><span style="width:70px;font-size:13px;font-weight:700">${esc(m.name)}</span>
-        <div class="bar-wrap" style="flex:1"><div class="bar-label">${why}</div></div></div>`;
     });
     html += '</div>';
   }

@@ -151,8 +151,8 @@ const SEED_TASKS = {
   molder:       { seq:2,  name:'モルダー',             unit:'分', min:1,   pri:1, type:'order',  maxW:1, source:'kakou_molder',  note:'加工予定表の予想加工時間から自動計算' },
   choshi_okuri: { seq:3,  name:'超仕上げ（送り）',     unit:'束', min:3,   pri:2, type:'semi',   maxW:1, source:'', note:'受けとペアで割振り' },
   choshi_uke:   { seq:4,  name:'超仕上げ（受け）',     unit:'束', min:3,   pri:2, type:'semi',   maxW:1, source:'', note:'送りとペアで割振り' },
-  anaake:       { seq:5,  name:'穴あけ（埋木用）',     unit:'枚', min:1,   pri:2, type:'semi',   maxW:1, source:'', note:'父専任' },
-  umeki:        { seq:6,  name:'穴埋め（埋木）',       unit:'枚', min:2,   pri:2, type:'semi',   maxW:2, source:'', note:'' },
+  anaake:       { seq:5,  name:'穴空け',               unit:'枚', min:0.63, pri:5, type:'semi',  maxW:1, source:'', note:'父専任' },
+  umeki:        { seq:6,  name:'埋木',                 unit:'枚', min:1.25, pri:5, type:'semi',  maxW:2, source:'', note:'必ず2人1組' },
   side:         { seq:7,  name:'サイド穴あけ・修正',   unit:'枚', min:2,   pri:3, type:'semi',   maxW:1, source:'', note:'モルダーでコマが出た材の修正' },
   pate:         { seq:8,  name:'パテ',                 unit:'枚', min:1,   pri:3, type:'semi',   maxW:2, source:'', note:'' },
   hamono_kenma: { seq:9,  name:'刃物研磨',             unit:'回', min:40,  pri:3, type:'maint',  maxW:1, source:'', note:'' },
@@ -638,9 +638,11 @@ function annualRequiredHours() {
   const req = requiredMinPerTask();
   return Math.round(Object.values(req).reduce((s,v)=>s+v,0) / 60);
 }
-function annualSupplyHours() {
+function annualSupplyHours(includeAbsent) {
   const wD = parseFloat((targets||{}).workDays)||245;
-  return Math.round(sortedMembers().reduce((s,[,m]) => s + capMinutes(m)/60*wD, 0));
+  return Math.round(sortedMembers()
+    .filter(([,m]) => includeAbsent || !isAbsent(m))
+    .reduce((s,[,m]) => s + capMinutes(m)/60*wD, 0));
 }
 // 今年の商品別実績（加工予定表の完了データから）
 function yearlyDoneByCode() {
@@ -719,8 +721,10 @@ function renderProducts() {
   // 作業別の必要工数（バッファ込み）
   const req = requiredMinPerTask();
   const reqTotal = annualRequiredHours();
-  const supply = annualSupplyHours();
+  const supply = annualSupplyHours(false);      // 休業中を除いた現戦力
+  const supplyAll = annualSupplyHours(true);    // 復帰後（全員）
   const fill = reqTotal ? Math.round(supply/reqTotal*100) : null;
+  const fillAll = reqTotal ? Math.round(supplyAll/reqTotal*100) : null;
   html += '<div class="sec"><h2>作業別ノルマ（年間目標×時間表から自動計算・バッファ' + bufferPct() + '%込み）</h2>';
   if (Object.keys(req).length) {
     html += '<table style="max-width:750px"><tr><th>作業</th><th>年間必要時間</th><th>1日あたり</th><th>月あたり</th></tr>';
@@ -734,10 +738,11 @@ function renderProducts() {
     html += '</table>';
     html += '<div class="cards" style="margin-top:12px">';
     html += `<div class="card"><div class="c-label">年間必要工数（バッファ込み）</div><div class="c-val">${reqTotal.toLocaleString()}<span style="font-size:14px"> h</span></div></div>`;
-    html += `<div class="card"><div class="c-label">年間労働力（現メンバー）</div><div class="c-val">${supply.toLocaleString()}<span style="font-size:14px"> h</span></div></div>`;
-    html += `<div class="card ${fill>=100?'hl':'warn'}"><div class="c-label">充足率</div><div class="c-val">${fill}%</div><div class="c-note">${fill>=100?'労働力は足りています。余力は'+(supply-reqTotal).toLocaleString()+'h/年':'⚠ 不足。残業・応援・目標調整が必要'}</div></div>`;
+    html += `<div class="card"><div class="c-label">年間労働力（休業中を除く）</div><div class="c-val">${supply.toLocaleString()}<span style="font-size:14px"> h</span></div>${supplyAll>supply?`<div class="c-note">復帰後(全員): ${supplyAll.toLocaleString()}h</div>`:''}</div>`;
+    html += `<div class="card ${fill>=100?'hl':'warn'}"><div class="c-label">充足率（現在）</div><div class="c-val">${fill}%</div><div class="c-note">${fill>=100?'余力 '+(supply-reqTotal).toLocaleString()+'h/年':'⚠ 不足。残業・応援・目標調整が必要'}</div></div>`;
+    if (supplyAll > supply) html += `<div class="card"><div class="c-label">充足率（復帰後・全員）</div><div class="c-val">${fillAll}%</div><div class="c-note">余力 ${(supplyAll-reqTotal).toLocaleString()}h/年</div></div>`;
     html += '</div>';
-    html += '<div class="hint">※労働力は育休なども含む全員分の単純計算。余力＝ストック作り・改善・営業に回せる時間。</div>';
+    html += '<div class="hint">※「現在」は休業中メンバーを除いた戦力。余力＝ストック作り・改善・営業に回せる時間。</div>';
   } else {
     html += '<div class="hint">年間目標（束）と時間表を入れると、ここに作業ごとの必要工数と充足率が出ます。</div>';
   }
@@ -934,7 +939,7 @@ function renderMembers() {
   sortedMembers().forEach(([id, m]) => {
     const rOpts = '<option value="">-</option>' + sortedTasks().map(([tid, t]) =>
       `<option value="${tid}" ${m.reserveTask===tid?'selected':''}>${esc(t.name)}</option>`).join('');
-    html += `<tr>
+    html += `<tr${isAbsent(m)?' style="opacity:.5;background:#fdf6ef"':''}>
       <td contenteditable="true" onblur="mEdit('${id}','seq',parseFloat(this.textContent)||99)">${m.seq||''}</td>
       <td class="l member-name" contenteditable="true" onblur="mEdit('${id}','name',this.textContent.trim())">${esc(m.name)}</td>
       <td contenteditable="true" onblur="mEdit('${id}','age',parseFloat(this.textContent)||'')">${m.age||''}</td>
@@ -949,6 +954,13 @@ function renderMembers() {
       <td class="l" contenteditable="true" onblur="mEdit('${id}','note',this.textContent.trim())" style="font-size:12px;color:#666">${esc(m.note||'')}</td>
       <td><button class="btn-del" onclick="if(confirm('「${esc(m.name)}」を削除しますか？'))db.ref('genba/members/${id}').remove()">削除</button></td></tr>`;
   });
+  // 合計行（休業中は現戦力から除外、復帰後も併記）
+  const actMin = sortedMembers().filter(([,m])=>!isAbsent(m)).reduce((s,[,m])=>s+capMinutes(m),0);
+  const allMin = sortedMembers().reduce((s,[,m])=>s+capMinutes(m),0);
+  const absentNames = sortedMembers().filter(([,m])=>isAbsent(m)).map(([,m])=>m.name).join('・');
+  html += `<tr style="background:#e8f5e9;font-weight:800">
+    <td colspan="6" class="l">合計（今使える戦力／1日）${absentNames?`<span style="font-weight:400;font-size:11px;color:#888">　休業中: ${esc(absentNames)} は除外</span>`:''}</td>
+    <td>${fmtMin(actMin)}</td><td colspan="6" class="l" style="font-weight:400;color:#666">${allMin>actMin?`復帰後(全員): <b>${fmtMin(allMin)}</b>（+${fmtMin(allMin-actMin)}）`:''}</td></tr>`;
   html += '</table><div style="margin-top:10px"><button class="btn blue" onclick="addMember()">＋ メンバーを追加</button></div>';
   html += '<div class="hint" style="margin-top:8px">実働＝出勤〜退勤から勤務時間内の休憩（10:00に15分・12:00に45分・15:00に15分）を自動で差し引いた時間。能率(%)：標準を100として、慣れてきたら110、体力的にゆっくりなら80のように（成長を織り込む欄）。<b>固定枠</b>：毎日必ず確保する時間（大樹のAI・業務改善など）。<b>休業中</b>：日付（例 2026-11-30）を入れると、その日まで出勤の初期値から外れます。年齢・引退予定は将来シミュレーションに使います。</div></div>';
 

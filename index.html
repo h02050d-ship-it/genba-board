@@ -99,6 +99,7 @@
   <div class="tab" data-page="norma" onclick="showPage('norma')">🎯 ノルマ・進捗</div>
   <div class="tab" data-page="tasks" onclick="showPage('tasks')">🛠 作業マスタ</div>
   <div class="tab" data-page="members" onclick="showPage('members')">👥 メンバー</div>
+  <div class="tab" data-page="staffing" onclick="showPage('staffing')">👤 人員計画</div>
   <div class="tab" data-page="future" onclick="showPage('future')">📈 将来シミュレーション</div>
 </div>
 
@@ -107,6 +108,7 @@
 <div class="page" id="page-norma"></div>
 <div class="page" id="page-tasks"></div>
 <div class="page" id="page-members"></div>
+<div class="page" id="page-staffing"></div>
 <div class="page" id="page-future"></div>
 <div class="toast" id="toast"></div>
 <div class="modal-overlay" id="taskModal" onclick="if(event.target===this)closeTaskModal()">
@@ -273,6 +275,8 @@ function ensureUpgrades() {
   // 商品マスタとバッファ率を後付け
   if (!Object.keys(products).length) ups['products'] = SEED_PRODUCTS;
   if (targets.bufferPct === undefined) ups['targets/bufferPct'] = 15;
+  // 月別配分（季節指数）＝昨年の納品書データの実績が初期値（3-4月ピーク・12-1月底）
+  if (!targets.monthShare) ups['targets/monthShare'] = { m1:5.5, m2:8, m3:13, m4:12.5, m5:9, m6:8.5, m7:8, m8:7, m9:8, m10:8.5, m11:7, m12:5 };
   // 穴あけ・穴埋めにペース上限の初期値（仮。実態に合わせて作業マスタで修正）
   if (tasks.anaake && tasks.anaake.paceNorm === undefined) ups['tasks/anaake/paceNorm'] = 200;
   if (tasks.umeki && tasks.umeki.paceNorm === undefined) ups['tasks/umeki/paceNorm'] = 100;
@@ -1058,6 +1062,318 @@ function renderFuture() {
   el.innerHTML = html;
 }
 
+// ===== 人員計画（月別配分・必要工数・構成シミュレーター） =====
+let staffState = { selected: {}, initialized: false, includeAbsentInSearch: false, cheapest: null };
+
+// 月別配分（%）を読む。sum＝合計（100からずれていないかチェック用）
+function getMonthShare() {
+  const ms = (targets||{}).monthShare || {};
+  const share = {}; let sum = 0;
+  for (let i=1; i<=12; i++) { const v = parseFloat(ms['m'+i]); const x = isNaN(v)?0:v; share[i]=x; sum+=x; }
+  return { share, sum };
+}
+// ある月の作業別必要分（分）＝ 商品ごと 年間目標×(その月の%/100)×1束あたり時間×(1+バッファ%) ＋ 毎日の定常作業×その月の稼働日数
+function reqMinTaskMonth(mi) {
+  const share = getMonthShare().share[mi] || 0;
+  const mult = 1 + bufferPct()/100;
+  const wD = parseFloat((targets||{}).workDays)||245;
+  const monthDays = wD/12;
+  const req = {};
+  sortedProducts().forEach(([, p]) => {
+    const yt = parseFloat(p.yearTarget)||0;
+    if (!yt) return;
+    Object.entries(p.taskMin||{}).forEach(([tid, m]) => {
+      if (!tasks[tid]) return;
+      req[tid] = (req[tid]||0) + yt * (share/100) * (parseFloat(m)||0) * mult;
+    });
+  });
+  sortedTasks().forEach(([tid, t]) => {
+    const dm = parseFloat(t.dailyMin)||0;
+    if (dm > 0) req[tid] = (req[tid]||0) + dm * monthDays;
+  });
+  return req;
+}
+// 定休日数（offDays文字列の曜日数。'月木'→2）
+function offDayCount(m) {
+  const s = String(m.offDays||'');
+  return ['月','火','水','木','金','土','日'].filter(w => s.includes(w)).length;
+}
+// メンバー1人の月間供給分（分）＝(実働×能率 − 固定枠)×月稼働日数×(1 − 定休日数/5)
+function memberMonthSupply(m) {
+  const wD = parseFloat((targets||{}).workDays)||245;
+  const monthDays = wD/12;
+  const per = Math.max(0, capMinutes(m) - (parseFloat(m.reserveMin)||0));
+  const offFactor = Math.max(0, 1 - offDayCount(m)/5);
+  return per * monthDays * offFactor;
+}
+// 最大流（Edmonds-Karp）。memberList=[{sup}], taskList=[{req, skilledBy:[メンバー番号]}]
+// 戻り: flow=流せた総分, totalReq=必要総分, shortByTaskIdx=作業ごとの不足分（分）
+function computeFill(memberList, taskList) {
+  const M = memberList.length, T = taskList.length;
+  const N = M + T + 2, S = 0, K = N - 1;
+  const g = Array.from({length:N}, () => []);
+  const addEdge = (u, v, c) => { g[u].push({to:v, cap:c, rev:g[v].length}); g[v].push({to:u, cap:0, rev:g[u].length-1}); };
+  memberList.forEach((mm, i) => addEdge(S, 1+i, Math.round(mm.sup)));
+  const taskSinkEdge = [];
+  taskList.forEach((tt, j) => {
+    const tj = 1 + M + j;
+    addEdge(tj, K, Math.round(tt.req));
+    taskSinkEdge[j] = g[tj].length - 1;   // task→sink 辺の位置
+    (tt.skilledBy||[]).forEach(i => addEdge(1+i, tj, Math.round(memberList[i].sup)));
+  });
+  let flow = 0;
+  while (true) {
+    const prev = new Array(N).fill(null);
+    const vis = new Array(N).fill(false);
+    const q = [S]; vis[S] = true;
+    while (q.length) {
+      const u = q.shift();
+      for (const e of g[u]) if (!vis[e.to] && e.cap > 0) { vis[e.to]=true; prev[e.to]={u,e}; q.push(e.to); }
+    }
+    if (!vis[K]) break;
+    let f = Infinity;
+    for (let v=K; v!==S; ) { const {u,e}=prev[v]; f=Math.min(f,e.cap); v=u; }
+    for (let v=K; v!==S; ) { const {u,e}=prev[v]; e.cap-=f; g[e.to][e.rev].cap+=f; v=u; }
+    flow += f;
+  }
+  // task→sink 辺の残余容量＝その作業の不足分
+  const shortByTaskIdx = taskList.map((tt, j) => { const tj = 1+M+j; return g[tj][taskSinkEdge[j]].cap; });
+  const totalReq = taskList.reduce((s,tt)=>s+Math.round(tt.req), 0);
+  return { flow, totalReq, shortByTaskIdx };
+}
+// 選択メンバー集合を12ヶ月シミュレーション
+function simulateSet(ids) {
+  const memList = ids.map(id => ({ id, sup: memberMonthSupply(members[id]||{}), skills: (members[id]||{}).skills||{} }));
+  const memberList = memList.map(mm => ({ sup: mm.sup }));
+  const months = []; let allOk = true;
+  for (let mi=1; mi<=12; mi++) {
+    const reqMap = reqMinTaskMonth(mi);
+    const taskIds = Object.keys(reqMap).filter(tid => reqMap[tid] > 0.5);
+    const taskList = taskIds.map(tid => ({
+      tid, req: reqMap[tid],
+      skilledBy: memList.map((mm,i)=>i).filter(i => memList[i].skills[tid])
+    }));
+    const res = computeFill(memberList, taskList);
+    const shortTasks = [];
+    taskList.forEach((tt, j) => { if (res.shortByTaskIdx[j] > 1) shortTasks.push({ tid: tt.tid, shortMin: res.shortByTaskIdx[j] }); });
+    const reqH = res.totalReq/60, supH = memberList.reduce((s,x)=>s+x.sup,0)/60;
+    const ok = shortTasks.length === 0;
+    if (!ok) allOk = false;
+    const marginPct = reqH > 0 ? (supH - reqH)/reqH*100 : 100;
+    months.push({ mi, reqH, supH, served: res.flow/60, shortTasks, ok, marginPct });
+  }
+  return { months, allOk };
+}
+// 年間必要分>0の作業ID一覧（商品ベース＋定常作業）
+function activeReqTaskIds() {
+  const set = {};
+  const req = requiredMinPerTask();
+  Object.keys(req).forEach(tid => { if (req[tid] > 0.5) set[tid] = 1; });
+  sortedTasks().forEach(([tid, t]) => { if (parseFloat(t.dailyMin) > 0) set[tid] = 1; });
+  return Object.keys(set);
+}
+// 人件費（この端末のlocalStorageのみ）
+function getStaffCosts() { try { return JSON.parse(localStorage.getItem('genba_staff_costs')||'{}')||{}; } catch(e){ return {}; } }
+function setStaffCost(id, yen) {
+  const c = getStaffCosts();
+  if (yen > 0) c[id] = yen; else delete c[id];
+  localStorage.setItem('genba_staff_costs', JSON.stringify(c));
+}
+function yearCostOf(ids) { const c = getStaffCosts(); return ids.reduce((s,id)=>s+((parseFloat(c[id])||0)*12), 0); }
+function baselineIds() { return sortedMembers().filter(([,m])=>!isAbsent(m)).map(([id])=>id); }
+
+function staffSelectedIds() { return sortedMembers().filter(([id])=>staffState.selected[id]).map(([id])=>id); }
+function toggleStaffMember(id) { staffState.selected[id] = !staffState.selected[id]; staffState.cheapest = null; renderStaffing(); }
+function editStaffCost(id, yen) { setStaffCost(id, parseFloat(yen)||0); staffState.cheapest = null; renderStaffing(); }
+function toggleStaffSearchAbsent(v) { staffState.includeAbsentInSearch = v; staffState.cheapest = null; renderStaffing(); }
+
+// 「回る中で一番安い構成」を全探索（2^n。休業中は既定で除外）
+function searchCheapest() {
+  const pool = sortedMembers()
+    .filter(([id, m]) => staffState.includeAbsentInSearch || !isAbsent(m))
+    .map(([id]) => id);
+  if (pool.length > 14) { toast('候補が多すぎます（14人以下で探索できます）'); return; }
+  const baseCost = yearCostOf(baselineIds());
+  const found = [];
+  const total = 1 << pool.length;
+  for (let mask=1; mask<total; mask++) {
+    const ids = [];
+    for (let i=0; i<pool.length; i++) if (mask & (1<<i)) ids.push(pool[i]);
+    const sim = simulateSet(ids);
+    if (!sim.allOk) continue;
+    let minMargin = Infinity, minMonth = 1;
+    sim.months.forEach(mo => { if (mo.marginPct < minMargin) { minMargin = mo.marginPct; minMonth = mo.mi; } });
+    found.push({ ids, cost: yearCostOf(ids), minMargin, minMonth, saving: baseCost - yearCostOf(ids) });
+  }
+  found.sort((a,b) => a.cost - b.cost || b.minMargin - a.minMargin);
+  staffState.cheapest = found.slice(0, 3);
+  staffState.searchedCount = found.length;
+  renderStaffing();
+}
+
+function renderStaffing() {
+  const el = document.getElementById('page-staffing');
+  if (!ready.g) return;
+  // 初期選択：休業中でない人をON（初回のみ）
+  if (!staffState.initialized && Object.keys(members).length) {
+    sortedMembers().forEach(([id, m]) => { staffState.selected[id] = !isAbsent(m); });
+    staffState.initialized = true;
+  }
+  const wD = parseFloat((targets||{}).workDays)||245;
+  const monthDays = wD/12;
+  const MN = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+  const fmtH = min => { const h = min/60; return (h>=10 ? Math.round(h) : Math.round(h*10)/10) + 'h'; };
+
+  let html = '';
+  html += '<div class="sec"><h2>👤 人員計画とは</h2><div class="hint">「年間目標を作るのに、月ごとに何時間の作業が必要か」を出し、それを<b>今のメンバーでこなせるか</b>を月単位でチェックします。忙しい月・人手が足りない月が先に分かるので、採用・応援・残業の判断に使えます。数字の元は「商品・年間計画」タブの目標と時間表です。</div></div>';
+
+  // ① 月別配分（季節指数）
+  const { share, sum } = getMonthShare();
+  const sumOff = Math.abs(sum - 100) > 0.5;
+  html += '<div class="sec"><h2>① 月別の配分（季節指数）</h2><div class="hint">年間目標を12ヶ月にどう振り分けるかの割合（%）。初期値は<b>昨年の納品書データの実績</b>（3〜4月がピーク、12〜1月が底）です。実態に合わせて直せます。合計は100%になるようにしてください。</div>';
+  html += '<div class="skills-scroll"><table style="min-width:640px"><tr>';
+  for (let i=1; i<=12; i++) html += `<th>${MN[i-1]}</th>`;
+  html += '<th>合計</th></tr><tr>';
+  for (let i=1; i<=12; i++) {
+    html += `<td><input type="number" step="0.1" style="width:52px" value="${share[i]||''}" onchange="db.ref('genba/targets/monthShare/m${i}').set(parseFloat(this.value)||0)"></td>`;
+  }
+  html += `<td class="qty-big" style="color:${sumOff?'#d32f2f':'#2e7d32'}">${Math.round(sum*10)/10}%</td></tr></table></div>`;
+  if (sumOff) html += `<div class="hint" style="color:#d32f2f;font-weight:700">⚠ 合計が ${Math.round(sum*10)/10}% です。100%になるよう調整してください。</div>`;
+  html += '</div>';
+
+  // 月別の必要分マップを先に計算
+  const monthReq = []; for (let mi=1; mi<=12; mi++) monthReq[mi] = reqMinTaskMonth(mi);
+  const reqTaskIds = sortedTasks().map(([tid])=>tid).filter(tid => { for (let mi=1;mi<=12;mi++) if ((monthReq[mi][tid]||0) > 0.5) return true; return false; });
+  // 平均実働h/日（休業中を除く現戦力の平均）
+  const actMembers = sortedMembers().filter(([,m])=>!isAbsent(m));
+  const avgWorkH = actMembers.length ? actMembers.reduce((s,[,m])=>s+capMinutes(m)/60, 0)/actMembers.length : 8;
+
+  // ② 月別・四半期別 必要工数ビュー
+  html += '<div class="sec"><h2>② 月別・四半期別の必要工数</h2><div class="hint">各作業に月ごと何時間必要か。バッファ' + bufferPct() + '%込み。Q1〜Q4は3ヶ月まとめ、年計は12ヶ月合計です。横にスクロールできます。</div>';
+  if (reqTaskIds.length) {
+    html += '<div class="skills-scroll"><table style="font-size:12px;min-width:900px"><tr><th style="min-width:120px">作業＼月</th>';
+    for (let i=1;i<=12;i++) html += `<th>${MN[i-1]}</th>`;
+    html += '<th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th><th>年計</th></tr>';
+    const qSum = [0,0,0,0], mSum = new Array(13).fill(0); let ySum = 0; const qSpan = [[1,2,3],[4,5,6],[7,8,9],[10,11,12]];
+    reqTaskIds.forEach(tid => {
+      const tk = tasks[tid]||{};
+      let rowY = 0; const qv = [0,0,0,0];
+      html += `<tr><td class="l" style="font-weight:700">${esc(tk.name)}</td>`;
+      for (let i=1;i<=12;i++) { const v = monthReq[i][tid]||0; rowY+=v; mSum[i]+=v; html += `<td>${v>0.5?fmtH(v):'-'}</td>`; }
+      qSpan.forEach((mo, qi) => { const s = mo.reduce((a,i)=>a+(monthReq[i][tid]||0),0); qv[qi]=s; });
+      html += `<td>${fmtH(qv[0])}</td><td>${fmtH(qv[1])}</td><td>${fmtH(qv[2])}</td><td>${fmtH(qv[3])}</td><td class="qty-big" style="font-size:13px">${fmtH(rowY)}</td></tr>`;
+      ySum += rowY;
+    });
+    // 合計必要時間/月
+    html += '<tr style="background:#e8f5e9;font-weight:800"><td class="l">合計 必要時間</td>';
+    for (let i=1;i<=12;i++) html += `<td>${fmtH(mSum[i])}</td>`;
+    html += `<td>${fmtH(mSum[1]+mSum[2]+mSum[3])}</td><td>${fmtH(mSum[4]+mSum[5]+mSum[6])}</td><td>${fmtH(mSum[7]+mSum[8]+mSum[9])}</td><td>${fmtH(mSum[10]+mSum[11]+mSum[12])}</td><td>${fmtH(ySum)}</td></tr>`;
+    // 必要人数/月＝月必要時間 ÷（平均実働h/日 × 月稼働日数）
+    html += '<tr style="background:#fff3e0;font-weight:700"><td class="l">必要人数（目安）</td>';
+    const need = i => { const denom = avgWorkH * monthDays; return denom>0 ? Math.round((mSum[i]/60)/denom*10)/10 : 0; };
+    for (let i=1;i<=12;i++) html += `<td>${need(i)}人</td>`;
+    const qNeed = (a,b,c) => { const denom = avgWorkH*monthDays; return denom>0 ? Math.round(((mSum[a]+mSum[b]+mSum[c])/60)/(denom*3)*10)/10 : 0; };
+    html += `<td>${qNeed(1,2,3)}人</td><td>${qNeed(4,5,6)}人</td><td>${qNeed(7,8,9)}人</td><td>${qNeed(10,11,12)}人</td><td>-</td></tr>`;
+    html += '</table></div>';
+    html += `<div class="hint" style="margin-top:6px">必要人数＝その月の必要時間 ÷（平均実働 ${Math.round(avgWorkH*10)/10}h/日 × 月${Math.round(monthDays)}日）。1人がその作業だけをやった場合の頭数の目安です（実際はスキルの制約があるので下のシミュレーターで確認）。</div>`;
+  } else {
+    html += '<div class="hint">「商品・年間計画」タブで年間目標（束）と商品×作業の時間表を入れると、ここに月別の必要工数が出ます。</div>';
+  }
+  html += '</div>';
+
+  // ③ メンバー構成シミュレーター
+  html += '<div class="sec"><h2>③ この人数で回るか試す（構成シミュレーター）</h2><div class="hint">チェックした人だけで1年を回せるか、月ごとに判定します。休業中の人もチェックすれば「復帰後」の想定にできます。</div>';
+  html += '<div class="hint" style="color:#1565c0">💡人件費はこの端末（このブラウザ）にだけ保存され、他の人の画面やサーバーには送られません。</div>';
+  const costs = getStaffCosts();
+  html += '<table style="max-width:640px"><tr><th>使う</th><th>名前</th><th>月間供給(h)</th><th>月あたり人件費(円・概算)</th></tr>';
+  sortedMembers().forEach(([id, m]) => {
+    const on = !!staffState.selected[id];
+    const supH = memberMonthSupply(m)/60;
+    const ab = isAbsent(m) ? ' <span style="font-size:11px;color:#e65100">🍼休業中</span>' : '';
+    html += `<tr>
+      <td><input type="checkbox" ${on?'checked':''} onchange="toggleStaffMember('${id}')"></td>
+      <td class="l member-name">${esc(m.name)}${ab}</td>
+      <td>${Math.round(supH)}h</td>
+      <td><input type="number" style="width:110px" value="${costs[id]!=null?costs[id]:''}" placeholder="例: 250000" onchange="editStaffCost('${id}',this.value)"> 円/月</td></tr>`;
+  });
+  html += '</table>';
+
+  const selIds = staffSelectedIds();
+  // 年間人件費と現構成比
+  const selCost = yearCostOf(selIds), baseCost = yearCostOf(baselineIds());
+  const diff = selCost - baseCost;
+  html += '<div class="cards" style="margin-top:12px">';
+  html += `<div class="card"><div class="c-label">選択構成の年間人件費</div><div class="c-val">${Math.round(selCost).toLocaleString()}<span style="font-size:14px"> 円</span></div></div>`;
+  html += `<div class="card ${diff<=0?'hl':'warn'}"><div class="c-label">現構成（休業除く全員）との差</div><div class="c-val">${diff>0?'+':''}${Math.round(diff).toLocaleString()}<span style="font-size:14px"> 円/年</span></div><div class="c-note">${diff<0?'削減':diff>0?'増加':'同じ'}</div></div>`;
+  html += '</div>';
+  html += '<div class="hint">人件費が未入力の人は0円として計算します。全員の人件費を入れると正確になります。</div>';
+
+  // maxW（2人作業）チェック
+  const warns = [];
+  activeReqTaskIds().forEach(tid => {
+    const tk = tasks[tid]||{};
+    if ((parseInt(tk.maxW)||1) >= 2) {
+      const cando = selIds.filter(id => (members[id].skills||{})[tid]).length;
+      if (cando <= 1) warns.push(`⚠ ${esc(tk.name)}は${tk.maxW}人作業ですが、できる人が${cando}人しかいません`);
+    }
+  });
+
+  // シミュレーション結果
+  if (!selIds.length) {
+    html += '<div class="hint" style="color:#d32f2f;font-weight:700;margin-top:10px">メンバーを1人以上選んでください。</div>';
+  } else {
+    const sim = simulateSet(selIds);
+    html += '<div style="margin-top:14px">';
+    if (sim.allOk) html += '<div style="font-size:22px;font-weight:800;color:#2e7d32;text-align:center;padding:8px">✅ この構成で全12ヶ月まわります</div>';
+    else html += '<div style="font-size:20px;font-weight:800;color:#e65100;text-align:center;padding:8px">⚠ 足りない月があります（下の表を確認）</div>';
+    html += '</div>';
+    warns.forEach(w => html += `<div class="hint" style="color:#e65100;font-weight:700">${w}</div>`);
+    html += '<div class="skills-scroll"><table style="min-width:640px;margin-top:8px"><tr><th>月</th><th>必要(h)</th><th>供給(h)</th><th>充足率</th><th>足りない作業</th></tr>';
+    sim.months.forEach(mo => {
+      const fill = mo.reqH>0 ? Math.round(mo.served/mo.reqH*100) : 100;
+      const shortTxt = mo.shortTasks.length
+        ? mo.shortTasks.map(s => `${esc((tasks[s.tid]||{}).name||s.tid)} ${fmtMin(s.shortMin)}不足`).join('、')
+        : '—';
+      html += `<tr${mo.ok?'':' class="short"'}><td style="font-weight:700">${MN[mo.mi-1]}</td>
+        <td>${Math.round(mo.reqH*10)/10}h</td>
+        <td>${Math.round(mo.supH)}h</td>
+        <td style="font-weight:700;color:${mo.ok?'#2e7d32':'#e65100'}">${fill}%${mo.ok?'':' ⚠'}</td>
+        <td class="l" style="font-size:12px">${shortTxt}</td></tr>`;
+    });
+    html += '</table></div>';
+    html += '<div class="hint" style="margin-top:6px">充足率＝スキル（できる作業）も考えて実際に割り振れた時間の割合。100%未満の月は、その作業ができる人を増やすか、応援・残業が必要です。</div>';
+  }
+  html += '</div>';
+
+  // ④ 最小構成の自動提案
+  html += '<div class="sec"><h2>④ 一番安い構成をさがす</h2><div class="hint">人件費を入れた上で、<b>全12ヶ月まわる中で年間人件費が一番安い組み合わせ</b>を上位3つ出します。全員の人件費を入れると正確になります（未入力は0円扱い）。</div>';
+  html += `<label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;margin-bottom:8px"><input type="checkbox" ${staffState.includeAbsentInSearch?'checked':''} onchange="toggleStaffSearchAbsent(this.checked)">休業中の人も候補に含める（復帰後の想定）</label>`;
+  html += '<div><button class="btn" onclick="searchCheapest()">💰 回る中で一番安い構成を探す</button></div>';
+  if (staffState.cheapest) {
+    if (!staffState.cheapest.length) {
+      html += '<div class="hint" style="color:#e65100;font-weight:700;margin-top:10px">⚠ どの組み合わせでも全12ヶ月は回りませんでした。目標を下げる・スキルを増やす・採用を検討してください。</div>';
+    } else {
+      html += `<div class="hint" style="margin-top:10px">全12ヶ月まわる構成は ${staffState.searchedCount} 通り見つかりました。安い順トップ3：</div>`;
+      html += '<div class="cards" style="margin-top:8px">';
+      const baseC = yearCostOf(baselineIds());
+      staffState.cheapest.forEach((c, i) => {
+        const names = c.ids.map(id => esc((members[id]||{}).name||id)).join('・');
+        html += `<div class="card ${i===0?'hl':''}" style="min-width:220px">
+          <div class="c-label">第${i+1}案（${c.ids.length}人）</div>
+          <div style="font-weight:800;font-size:14px;margin:2px 0">${names}</div>
+          <div class="c-val" style="font-size:20px">${Math.round(c.cost).toLocaleString()}<span style="font-size:13px"> 円/年</span></div>
+          <div class="c-note">現構成比 ${c.saving>0?'−'+Math.round(c.saving).toLocaleString()+'円':c.saving<0?'+'+Math.round(-c.saving).toLocaleString()+'円':'同額'}</div>
+          <div class="c-note">最も余裕がない月: ${MN[c.minMonth-1]}（余力 ${Math.round(c.minMargin)}%）</div></div>`;
+      });
+      html += '</div>';
+      html += '<div class="hint" style="margin-top:6px">「余力」＝その月に供給が必要をどれだけ上回っているか。小さいほどギリギリの月です。安さだけでなく余力も見て決めてください。</div>';
+    }
+  }
+  html += '</div>';
+
+  el.innerHTML = html;
+}
+
 // ===== 画面切替 =====
 function showPage(p) {
   curPage = p;
@@ -1073,6 +1389,7 @@ function renderAll() {
   else if (curPage==='norma') renderNorma();
   else if (curPage==='tasks') renderTasks();
   else if (curPage==='members') renderMembers();
+  else if (curPage==='staffing') renderStaffing();
   else if (curPage==='future') renderFuture();
 }
 document.getElementById('planDate').value = today();

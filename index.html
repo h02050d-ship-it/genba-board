@@ -153,8 +153,8 @@ const SEED_TASKS = {
   molder:       { seq:2,  name:'モルダー',             unit:'分', min:1,   pri:1, type:'order',  maxW:1, source:'kakou_molder',  note:'加工予定表の予想加工時間から自動計算' },
   choshi_okuri: { seq:3,  name:'超仕上げ（送り）',     unit:'束', min:3,   pri:2, type:'semi',   maxW:1, source:'', note:'受けとペアで割振り' },
   choshi_uke:   { seq:4,  name:'超仕上げ（受け）',     unit:'束', min:3,   pri:2, type:'semi',   maxW:1, source:'', note:'送りとペアで割振り' },
-  anaake:       { seq:5,  name:'穴空け',               unit:'枚', min:0.63, pri:5, type:'semi',  maxW:1, source:'', note:'父専任' },
-  umeki:        { seq:6,  name:'埋木',                 unit:'枚', min:1.25, pri:5, type:'semi',  maxW:2, source:'', note:'必ず2人1組' },
+  anaake:       { seq:5,  name:'穴空け',               unit:'束', min:5,  pri:5, type:'semi',  maxW:1, source:'', yamaSize:24, note:'父専任。1束=8枚・24束=1山' },
+  umeki:        { seq:6,  name:'埋木',                 unit:'束', min:10, pri:5, type:'semi',  maxW:2, source:'', yamaSize:24, note:'必ず2人1組。1束=8枚・24束=1山' },
   side:         { seq:7,  name:'サイド穴あけ・修正',   unit:'枚', min:2,   pri:3, type:'semi',   maxW:1, source:'', note:'モルダーでコマが出た材の修正' },
   pate:         { seq:8,  name:'パテ',                 unit:'枚', min:1,   pri:3, type:'semi',   maxW:2, source:'', note:'' },
   hamono_kenma: { seq:9,  name:'刃物研磨',             unit:'回', min:40,  pri:3, type:'maint',  maxW:1, source:'', note:'' },
@@ -225,6 +225,13 @@ function toast(msg) { const t = document.getElementById('toast'); t.textContent 
 const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const fmtMin = min => { const m = Math.round(min); if (m<=0) return '0分'; if (m<60) return m+'分'; const h=Math.floor(m/60), mm=m%60; return mm? h+'時間'+mm+'分' : h+'時間'; };
 const sortedTasks = () => Object.entries(tasks).sort((a,b)=>(a[1].seq||99)-(b[1].seq||99));
+// 山換算（yamaSize=1山あたりの束数を設定した作業だけ「（◯山）」を併記）
+function yamaTxt(tk, qty) {
+  const ys = parseFloat((tk||{}).yamaSize)||0;
+  const q = parseFloat(qty)||0;
+  if (!ys || q <= 0) return '';
+  return `<span style="font-size:11px;color:#888">（${Math.round(q/ys*10)/10}山）</span>`;
+}
 const sortedMembers = () => Object.entries(members).sort((a,b)=>(a[1].seq||99)-(b[1].seq||99));
 
 // ===== 起動 =====
@@ -277,9 +284,11 @@ function ensureUpgrades() {
   if (targets.bufferPct === undefined) ups['targets/bufferPct'] = 15;
   // 月別配分（季節指数）＝昨年の納品書データの実績が初期値（3-4月ピーク・12-1月底）
   if (!targets.monthShare) ups['targets/monthShare'] = { m1:5.5, m2:8, m3:13, m4:12.5, m5:9, m6:8.5, m7:8, m8:7, m9:8, m10:8.5, m11:7, m12:5 };
-  // 穴あけ・穴埋めにペース上限の初期値（仮。実態に合わせて作業マスタで修正）
-  if (tasks.anaake && tasks.anaake.paceNorm === undefined) ups['tasks/anaake/paceNorm'] = 200;
-  if (tasks.umeki && tasks.umeki.paceNorm === undefined) ups['tasks/umeki/paceNorm'] = 100;
+  // 穴空け・埋木にペース上限の初期値（束/日）と山換算(24束=1山)
+  if (tasks.anaake && tasks.anaake.paceNorm === undefined) ups['tasks/anaake/paceNorm'] = 40;
+  if (tasks.umeki && tasks.umeki.paceNorm === undefined) ups['tasks/umeki/paceNorm'] = 40;
+  if (tasks.anaake && tasks.anaake.yamaSize === undefined) ups['tasks/anaake/yamaSize'] = 24;
+  if (tasks.umeki && tasks.umeki.yamaSize === undefined) ups['tasks/umeki/yamaSize'] = 24;
   // 旧「作業待ちの量」→ 優先度付き待ちリストへ移行（ストック扱い）
   if (!Object.keys(queueItems).length && Object.keys(queue).length) {
     Object.entries(queue).forEach(([tid, q]) => {
@@ -510,10 +519,10 @@ function renderToday() {
         const low = days !== null && days < 7;
         const status = over ? '⚠ 食いすぎ（上限超え）' : low ? '⚠ 在庫僅少 → 前工程を進める' : '✅ 適正';
         html += `<tr${(over||low)?' class="short"':''}><td class="l" style="font-weight:700">${esc(tk.name)}</td>
-          <td class="qty-big">${stock} ${esc(tk.unit)}</td>
-          <td>${norm} ${esc(tk.unit)}/日</td>
+          <td class="qty-big">${stock} ${esc(tk.unit)}${yamaTxt(tk, stock)}</td>
+          <td>${norm} ${esc(tk.unit)}/日${yamaTxt(tk, norm)}</td>
           <td>${avg7} ${esc(tk.unit)}/日</td>
-          <td class="qty-big">${todayQty} ${esc(tk.unit)}</td>
+          <td class="qty-big">${todayQty} ${esc(tk.unit)}${yamaTxt(tk, todayQty)}</td>
           <td>${days===null ? '-' : '約'+days+'日'}</td>
           <td style="font-weight:700">${status}</td></tr>`;
       });
@@ -548,7 +557,7 @@ function renderToday() {
         <td><select onchange="qEdit('${qid}','pri',parseInt(this.value))">${priOpts}</select></td>
         <td><select onchange="qEdit('${qid}','t',this.value)">${tOpts}</select></td>
         <td><input type="number" style="width:90px" value="${q.qty||''}" placeholder="0" onchange="qEdit('${qid}','qty',parseFloat(this.value)||0)"></td>
-        <td>${esc(tk.unit||'')}</td>
+        <td>${esc(tk.unit||'')}${yamaTxt(tk, parseFloat(q.qty))}</td>
         <td>${(parseFloat(q.qty)>0 && tk.min>0) ? fmtMin(q.qty*tk.min) : '-'}</td>
         <td><input type="text" style="width:220px" value="${esc(q.note||'')}" placeholder="例: ○○様分 / 7月中" onchange="qEdit('${qid}','note',this.value)"></td>
         <td><button class="btn-del" onclick="db.ref('genba/queueItems/${qid}').remove()">✕</button></td></tr>`;
@@ -588,7 +597,7 @@ function renderToday() {
         html += `<td><select style="font-weight:800" onchange="editRow(${i},'m',this.value)">${mOpts}</select></td>`;
         html += `<td><select onchange="editRow(${i},'t',this.value)">${opts}</select></td>
           <td><input type="number" style="width:70px" value="${r.min}" onchange="editRow(${i},'min',parseFloat(this.value)||0)"> 分</td>
-          <td class="qty-big">${r.qty!=='' && r.qty!=null ? esc(r.qty)+' '+esc(tk.unit||'') : '-'}</td>
+          <td class="qty-big">${r.qty!=='' && r.qty!=null ? esc(r.qty)+' '+esc(tk.unit||'')+yamaTxt(tk, r.qty) : '-'}</td>
           <td><input type="number" style="width:70px" value="${r.qtyDone!=null&&r.qtyDone!==''?r.qtyDone:''}" placeholder="${r.qty!==''&&r.qty!=null?r.qty:'-'}" onchange="editRow(${i},'qtyDone',this.value===''?'':parseFloat(this.value))"> ${esc(tk.unit||'')}</td>
           <td><input type="number" style="width:70px" value="${r.minDone!=null&&r.minDone!==''?r.minDone:''}" placeholder="${r.min}" onchange="editRow(${i},'minDone',this.value===''?'':parseFloat(this.value))"></td>
           <td><input type="text" style="width:120px" value="${esc(r.note||'')}" onchange="editRow(${i},'note',this.value)"></td>

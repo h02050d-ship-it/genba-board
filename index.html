@@ -3,6 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://www.gstatic.com">
+<link rel="preconnect" href="https://kakou-yotei-default-rtdb.firebaseio.com" crossorigin>
+<link rel="preconnect" href="https://identitytoolkit.googleapis.com" crossorigin>
+<link rel="dns-prefetch" href="https://www.gstatic.com">
+<link rel="dns-prefetch" href="https://kakou-yotei-default-rtdb.firebaseio.com">
 <title>現場作業ボード</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%23f9a825'/><text x='50' y='50' font-size='72' font-weight='bold' text-anchor='middle' dominant-baseline='central' fill='white' font-family='sans-serif'>現</text></svg>">
 <style>
@@ -217,6 +222,20 @@ let kakouItems = [];
 let plan = null;          // 表示中日付のプラン {att:{}, rows:[]}
 let curPage = 'today';
 let ready = { g:false, k:false };
+let synced = false;       // 初回のFirebase同期が来たか（前回データ表示中にプラン全体を誤保存しないためのガード）
+
+// ===== 起動高速化: 前回データを端末に保存→次回は即描画（裏でFirebase同期が来たら置き換え） =====
+const SRV_CACHE_KEY = 'genba_srv_cache_v1';
+function saveSrvCache() {
+  try {
+    localStorage.setItem(SRV_CACHE_KEY, JSON.stringify({
+      t: Date.now(),
+      g: { tasks, members, queueItems, targets, actuals, products },
+      k: kakouItems,
+      planDate: curDate(), plan
+    }));
+  } catch(e) {}
+}
 
 function today() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
 function curDate() { return document.getElementById('planDate').value || today(); }
@@ -249,9 +268,11 @@ function init() {
     const p = (g.plans||{})[curDate()];
     plan = p ? JSON.parse(JSON.stringify(p)) : plan;
     ready.g = true;
+    synced = true;
     document.getElementById('connStatus').textContent = '✓ 同期中';
     ensureUpgrades();
     renderAll();
+    saveSrvCache();
   }, err => {
     document.getElementById('page-today').innerHTML = '<div class="loading">genba領域にアクセスできません: ' + esc(err.message) + '<br>Firebaseのルールで genba への読み書き許可が必要です。</div>';
   });
@@ -260,6 +281,7 @@ function init() {
     kakouItems = Object.values(data);
     ready.k = true;
     renderAll();
+    if (synced) saveSrvCache();
   });
 }
 // 既存データに新機能のフィールドを後付け（欠けている分だけ書き込む）
@@ -434,6 +456,7 @@ let saveTimer = null;
 let pendingSave = null;
 function savePlan(showToast) {
   if (!plan) return;
+  if (!synced) return;   // 前回データ表示中（初回同期前）はプラン全体の保存をしない＝サーバー側の最新プランを誤って上書きしない
   plan.savedAt = Date.now();
   statsCache = null; // 実績が変わったので集計を取り直す
   if (saveTimer) clearTimeout(saveTimer);
@@ -957,6 +980,7 @@ function saveNewTask() {
 // ===== 実績集計（済にした行の実績量・実時間から） =====
 let statsCache = null;
 function loadStats(cb) {
+  if (!synced) return;   // 認証・初回同期前は読みにいかない（前回データ表示中は同期後に自動で集計される）
   db.ref('genba/plans').once('value', s => {
     const all = s.val()||{};
     const agg = {};
@@ -1402,6 +1426,21 @@ function renderAll() {
   else if (curPage==='future') renderFuture();
 }
 document.getElementById('planDate').value = today();
+
+// ===== 起動高速化: 前回データがあれば即描画（Firebase同期が来たらそのデータで置き換わる） =====
+(function() {
+  try {
+    const c = JSON.parse(localStorage.getItem(SRV_CACHE_KEY) || 'null');
+    if (!c || !c.g || !c.g.tasks || !Object.keys(c.g.tasks).length) return;
+    tasks = c.g.tasks || {}; members = c.g.members || {}; queueItems = c.g.queueItems || {};
+    targets = c.g.targets || {}; actuals = c.g.actuals || {}; products = c.g.products || {};
+    if (Array.isArray(c.k)) { kakouItems = c.k; ready.k = true; }
+    if (c.planDate === curDate() && c.plan) plan = JSON.parse(JSON.stringify(c.plan));
+    ready.g = true;
+    document.getElementById('connStatus').textContent = '前回データ表示中…';
+    renderAll();
+  } catch(e) {}
+})();
 </script>
 </body>
 </html>
